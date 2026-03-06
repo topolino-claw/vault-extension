@@ -1,5 +1,6 @@
 /**
  * Vault Chrome Extension — Popup Logic
+ * All event handlers registered via addEventListener (MV3 CSP compliance)
  */
 
 // ============================================
@@ -22,15 +23,8 @@ let currentTabDomain = null;
 let activeSuggestionIndex = -1;
 let currentSuggestions = [];
 
-const RELAYS = [
-  'wss://relay.damus.io',
-  'wss://nostr-pub.wellorder.net',
-  'wss://relay.snort.social',
-  'wss://nos.lol',
-];
-
 // ============================================
-// Init
+// Init & Event Binding
 // ============================================
 document.addEventListener('DOMContentLoaded', async () => {
   // Get current tab domain
@@ -43,29 +37,101 @@ document.addEventListener('DOMContentLoaded', async () => {
     console.error('Could not get tab:', e);
   }
 
-  // Check for saved encrypted vault
-  const encrypted = await VaultStorage.getEncrypted();
-  if (encrypted && Object.keys(encrypted).length > 0) {
-    // Has saved vault — show unlock option prominently
+  // Check if vault is unlocked in background
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'GET_VAULT_STATE' });
+    if (response?.unlocked) {
+      vault.privateKey = response.privateKey;
+      vault.seedPhrase = response.seedPhrase;
+      vault.users = response.users || {};
+      vault.settings = response.settings || { hashLength: 16 };
+      showScreen('mainScreen');
+    }
+  } catch (e) {
+    console.error('Background check failed:', e);
   }
 
-  // Check if vault data exists in session (background keeps unlocked state)
-  const response = await chrome.runtime.sendMessage({ type: 'GET_VAULT_STATE' });
-  if (response?.unlocked) {
-    vault.privateKey = response.privateKey;
-    vault.seedPhrase = response.seedPhrase;
-    vault.users = response.users || {};
-    vault.settings = response.settings || { hashLength: 16 };
-    showScreen('mainScreen');
-  }
+  // ---- Bind all event listeners ----
+
+  // Welcome screen
+  $('btnNewVault').addEventListener('click', () => showScreen('newWalletScreen'));
+  $('btnRestore').addEventListener('click', () => showScreen('restoreScreen'));
+  $('btnUnlock').addEventListener('click', () => showScreen('unlockScreen'));
+
+  // New wallet
+  $('backFromNew').addEventListener('click', goBack);
+  $('btnConfirmSeed').addEventListener('click', confirmSeedBackup);
+
+  // Verify seed
+  $('backFromVerify').addEventListener('click', goBack);
+  $('btnVerifySeed').addEventListener('click', verifySeedBackup);
+
+  // Restore
+  $('backFromRestore').addEventListener('click', goBack);
+  $('restoreSeedInput').addEventListener('input', onSeedInput);
+  $('restoreSeedInput').addEventListener('keydown', onSeedKeydown);
+  $('btnRestoreSeed').addEventListener('click', restoreFromSeed);
+
+  // Unlock
+  $('backFromUnlockScreen').addEventListener('click', goBack);
+  $('unlockPassword').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') unlockVault();
+  });
+  $('btnUnlockVault').addEventListener('click', unlockVault);
+
+  // Main screen
+  $('btnSettings').addEventListener('click', () => showScreen('settingsScreen'));
+  $('btnLock').addEventListener('click', lockVault);
+  $('siteSearch').addEventListener('input', filterSites);
+  $('siteSearch').addEventListener('keydown', handleSearchEnter);
+  $('btnDomainBanner').addEventListener('click', openSiteFromBanner);
+
+  // Generate screen
+  $('backFromGenerate').addEventListener('click', goBack);
+  $('genSite').addEventListener('input', updatePassword);
+  $('genUser').addEventListener('input', updatePassword);
+  $('btnToggleVis').addEventListener('click', togglePasswordVisibility);
+  $('btnNonceDec').addEventListener('click', decrementNonce);
+  $('btnNonceInc').addEventListener('click', incrementNonce);
+  $('btnCopyPassword').addEventListener('click', copyPassword);
+  $('btnFillPassword').addEventListener('click', fillPassword);
+
+  // Settings
+  $('backFromSettings').addEventListener('click', goBack);
+  $('settEncrypt').addEventListener('click', () => showScreen('encryptScreen'));
+  $('settViewSeed').addEventListener('click', showSeedPhrase);
+  $('settAdvanced').addEventListener('click', () => showScreen('advancedScreen'));
+  $('settNostrBackup').addEventListener('click', () => backupToNostr());
+  $('settNostrRestore').addEventListener('click', restoreFromNostr);
+  $('settExport').addEventListener('click', downloadData);
+
+  // Encrypt screen
+  $('backFromEncrypt').addEventListener('click', goBack);
+  $('encryptPass2').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') saveEncrypted();
+  });
+  $('btnSaveEncrypted').addEventListener('click', saveEncrypted);
+
+  // View seed
+  $('backFromViewSeed').addEventListener('click', goBack);
+  $('btnCopySeed').addEventListener('click', copySeedPhrase);
+
+  // Advanced
+  $('backFromAdvanced').addEventListener('click', goBack);
+  $('btnSaveAdvanced').addEventListener('click', saveAdvancedSettings);
 });
+
+// Shorthand
+function $(id) {
+  return document.getElementById(id);
+}
 
 // ============================================
 // Navigation
 // ============================================
 function showScreen(screenId) {
   document.querySelectorAll('.screen').forEach((s) => s.classList.add('hidden'));
-  const target = document.getElementById(screenId);
+  const target = $(screenId);
   if (target) {
     target.classList.remove('hidden');
     if (navigationStack[navigationStack.length - 1] !== screenId) {
@@ -79,8 +145,7 @@ function showScreen(screenId) {
   } else if (screenId === 'newWalletScreen') {
     generateNewSeed();
   } else if (screenId === 'advancedScreen') {
-    document.getElementById('hashLengthSetting').value =
-      vault.settings.hashLength || 16;
+    $('hashLengthSetting').value = vault.settings.hashLength || 16;
   }
 }
 
@@ -94,19 +159,19 @@ function goBack() {
 // Toast / Loading
 // ============================================
 function showToast(message) {
-  const toast = document.getElementById('toast');
+  const toast = $('toast');
   toast.textContent = message;
   toast.classList.add('show');
   setTimeout(() => toast.classList.remove('show'), 2000);
 }
 
 function showLoading(text) {
-  document.getElementById('loadingText').textContent = text;
-  document.getElementById('loadingModal').classList.remove('hidden');
+  $('loadingText').textContent = text;
+  $('loadingModal').classList.remove('hidden');
 }
 
 function hideLoading() {
-  document.getElementById('loadingModal').classList.add('hidden');
+  $('loadingModal').classList.add('hidden');
 }
 
 // ============================================
@@ -116,13 +181,13 @@ async function generateNewSeed() {
   const mnemonic = await VaultCore.generateMnemonic();
   vault.seedPhrase = mnemonic;
 
-  const grid = document.getElementById('seedGrid');
+  const grid = $('seedGrid');
   grid.innerHTML = '';
 
   mnemonic.split(' ').forEach((word, i) => {
     const div = document.createElement('div');
     div.className = 'seed-word';
-    div.innerHTML = `<span>${i + 1}.</span>${word}`;
+    div.innerHTML = `<span>${i + 1}.</span>${escapeHtml(word)}`;
     grid.appendChild(div);
   });
 }
@@ -136,19 +201,28 @@ function confirmSeedBackup() {
   }
   indices.sort((a, b) => a - b);
 
-  const container = document.getElementById('verifyInputs');
+  const container = $('verifyInputs');
   container.innerHTML = '';
   container.dataset.indices = JSON.stringify(indices);
 
   indices.forEach((i) => {
     const div = document.createElement('div');
     div.className = 'input-group';
-    div.innerHTML = `
-      <label>Word #${i + 1}</label>
-      <input type="text" class="verify-word" data-index="${i}" 
-             placeholder="Enter word ${i + 1}" 
-             onkeydown="if(event.key==='Enter')verifySeedBackup()">
-    `;
+
+    const label = document.createElement('label');
+    label.textContent = `Word #${i + 1}`;
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'verify-word';
+    input.dataset.index = i;
+    input.placeholder = `Enter word ${i + 1}`;
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') verifySeedBackup();
+    });
+
+    div.appendChild(label);
+    div.appendChild(input);
     container.appendChild(div);
   });
 
@@ -179,7 +253,7 @@ async function verifySeedBackup() {
 }
 
 async function restoreFromSeed() {
-  const input = document.getElementById('restoreSeedInput').value;
+  const input = $('restoreSeedInput').value;
   const valid = await VaultCore.verifyBip39SeedPhrase(input);
 
   if (!valid) {
@@ -198,17 +272,6 @@ async function initializeVault(seedPhrase) {
   vault.seedPhrase = seedPhrase.replace(/\s+/g, ' ').trim().toLowerCase();
   vault.privateKey = await VaultCore.derivePrivateKey(vault.seedPhrase);
 
-  // Sync vault state to background service worker
-  await chrome.runtime.sendMessage({
-    type: 'SET_VAULT_STATE',
-    data: {
-      privateKey: vault.privateKey,
-      seedPhrase: vault.seedPhrase,
-      users: vault.users,
-      settings: vault.settings,
-    },
-  });
-
   // Try to load saved site data
   const saved = await VaultStorage.getVault();
   if (saved) {
@@ -216,6 +279,9 @@ async function initializeVault(seedPhrase) {
     if (saved.settings)
       vault.settings = { ...vault.settings, ...saved.settings };
   }
+
+  // Sync vault state to background service worker
+  await syncStateToBackground();
 }
 
 async function lockVault() {
@@ -232,14 +298,30 @@ async function lockVault() {
   showToast('Vault locked');
 }
 
+async function syncStateToBackground() {
+  await chrome.runtime.sendMessage({
+    type: 'SET_VAULT_STATE',
+    data: {
+      privateKey: vault.privateKey,
+      seedPhrase: vault.seedPhrase,
+      users: vault.users,
+      settings: vault.settings,
+    },
+  });
+}
+
 // ============================================
 // Domain Banner (current tab detection)
 // ============================================
 function showDomainBanner() {
-  const banner = document.getElementById('domainBanner');
-  const bannerText = document.getElementById('domainBannerText');
+  const banner = $('domainBanner');
+  const bannerText = $('domainBannerText');
 
-  if (!currentTabDomain || currentTabDomain === 'newtab' || currentTabDomain.includes('chrome')) {
+  if (
+    !currentTabDomain ||
+    currentTabDomain === 'newtab' ||
+    currentTabDomain.includes('chrome')
+  ) {
     banner.classList.add('hidden');
     return;
   }
@@ -271,9 +353,9 @@ function openSiteFromBanner() {
 // Site List
 // ============================================
 function renderSiteList() {
-  const container = document.getElementById('siteList');
-  const emptyState = document.getElementById('emptyState');
-  const searchTerm = document.getElementById('siteSearch').value.toLowerCase();
+  const container = $('siteList');
+  const emptyState = $('emptyState');
+  const searchTerm = $('siteSearch').value.toLowerCase();
 
   const sites = [];
   Object.entries(vault.users || {}).forEach(([user, userSites]) => {
@@ -304,21 +386,24 @@ function renderSiteList() {
   }
 
   emptyState.classList.add('hidden');
-  container.innerHTML = filtered
-    .map((s) => {
-      const isCurrentSite = s.site === currentTabDomain;
-      return `
-      <div class="site-item ${isCurrentSite ? 'current-site' : ''}" 
-           onclick="openSite('${escapeAttr(s.site)}', '${escapeAttr(s.user)}', ${s.nonce})">
-        <div class="site-icon">${s.site.charAt(0)}</div>
-        <div class="site-info">
-          <div class="site-name">${escapeHtml(s.site)}</div>
-          <div class="site-user">${escapeHtml(s.user)}</div>
-        </div>
+  container.innerHTML = '';
+
+  filtered.forEach((s) => {
+    const div = document.createElement('div');
+    div.className = 'site-item';
+    if (s.site === currentTabDomain) div.classList.add('current-site');
+
+    div.innerHTML = `
+      <div class="site-icon">${escapeHtml(s.site.charAt(0))}</div>
+      <div class="site-info">
+        <div class="site-name">${escapeHtml(s.site)}</div>
+        <div class="site-user">${escapeHtml(s.user)}</div>
       </div>
     `;
-    })
-    .join('');
+
+    div.addEventListener('click', () => openSite(s.site, s.user, s.nonce));
+    container.appendChild(div);
+  });
 }
 
 function filterSites() {
@@ -327,7 +412,7 @@ function filterSites() {
 
 function handleSearchEnter(event) {
   if (event.key === 'Enter') {
-    const term = document.getElementById('siteSearch').value.trim();
+    const term = $('siteSearch').value.trim();
     if (term) {
       openSite(term, '', 0);
     }
@@ -340,22 +425,18 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-function escapeAttr(str) {
-  return str.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-}
-
 // ============================================
 // Password Generation Screen
 // ============================================
 function openSite(site, user, nonce) {
-  document.getElementById('genSite').value = site;
-  document.getElementById('genUser').value = user;
+  $('genSite').value = site;
+  $('genUser').value = user;
   currentNonce = nonce || 0;
   originalNonce = currentNonce;
-  document.getElementById('nonceDisplay').textContent = currentNonce + 1;
+  $('nonceDisplay').textContent = currentNonce + 1;
   passwordVisible = false;
-  document.getElementById('genPassword').textContent = '••••••••••••';
-  document.getElementById('visibilityIcon').textContent = '👁️';
+  $('genPassword').textContent = '••••••••••••';
+  $('visibilityIcon').textContent = '👁️';
   updateNonceIndicator();
 
   if (site && user) {
@@ -375,11 +456,11 @@ function updateNonceIndicator() {
 }
 
 function updatePassword() {
-  const site = document.getElementById('genSite').value.trim();
-  const user = document.getElementById('genUser').value.trim();
+  const site = $('genSite').value.trim();
+  const user = $('genUser').value.trim();
 
   if (!site || !user || !vault.privateKey) {
-    document.getElementById('genPassword').textContent = '••••••••••••';
+    $('genPassword').textContent = '••••••••••••';
     return;
   }
 
@@ -392,26 +473,24 @@ function updatePassword() {
   );
 
   if (passwordVisible) {
-    document.getElementById('genPassword').textContent = pass;
+    $('genPassword').textContent = pass;
   }
 }
 
 function togglePasswordVisibility() {
   passwordVisible = !passwordVisible;
-  document.getElementById('visibilityIcon').textContent = passwordVisible
-    ? '🙈'
-    : '👁️';
+  $('visibilityIcon').textContent = passwordVisible ? '🙈' : '👁️';
 
   if (passwordVisible) {
     updatePassword();
   } else {
-    document.getElementById('genPassword').textContent = '••••••••••••';
+    $('genPassword').textContent = '••••••••••••';
   }
 }
 
 function incrementNonce() {
   currentNonce++;
-  document.getElementById('nonceDisplay').textContent = currentNonce + 1;
+  $('nonceDisplay').textContent = currentNonce + 1;
   updateNonceIndicator();
   if (passwordVisible) updatePassword();
 }
@@ -419,15 +498,15 @@ function incrementNonce() {
 function decrementNonce() {
   if (currentNonce > 0) {
     currentNonce--;
-    document.getElementById('nonceDisplay').textContent = currentNonce + 1;
+    $('nonceDisplay').textContent = currentNonce + 1;
     updateNonceIndicator();
     if (passwordVisible) updatePassword();
   }
 }
 
 async function copyPassword() {
-  const site = document.getElementById('genSite').value.trim();
-  const user = document.getElementById('genUser').value.trim();
+  const site = $('genSite').value.trim();
+  const user = $('genUser').value.trim();
 
   if (!site || !user) {
     showToast('Enter site and username');
@@ -461,8 +540,8 @@ async function copyPassword() {
 }
 
 async function fillPassword() {
-  const site = document.getElementById('genSite').value.trim();
-  const user = document.getElementById('genUser').value.trim();
+  const site = $('genSite').value.trim();
+  const user = $('genUser').value.trim();
 
   if (!site || !user) {
     showToast('Enter site and username');
@@ -484,7 +563,10 @@ async function fillPassword() {
 
   // Send fill command to content script
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
     if (tab?.id) {
       await chrome.tabs.sendMessage(tab.id, {
         type: 'FILL_PASSWORD',
@@ -502,23 +584,11 @@ async function fillPassword() {
   await syncStateToBackground();
 }
 
-async function syncStateToBackground() {
-  await chrome.runtime.sendMessage({
-    type: 'SET_VAULT_STATE',
-    data: {
-      privateKey: vault.privateKey,
-      seedPhrase: vault.seedPhrase,
-      users: vault.users,
-      settings: vault.settings,
-    },
-  });
-}
-
 // ============================================
 // Encryption
 // ============================================
 async function unlockVault() {
-  const password = document.getElementById('unlockPassword').value;
+  const password = $('unlockPassword').value;
   if (!password) {
     showToast('Enter password');
     return;
@@ -558,8 +628,8 @@ async function unlockVault() {
 }
 
 async function saveEncrypted() {
-  const pass1 = document.getElementById('encryptPass1').value;
-  const pass2 = document.getElementById('encryptPass2').value;
+  const pass1 = $('encryptPass1').value;
+  const pass2 = $('encryptPass2').value;
 
   if (!pass1 || pass1 !== pass2) {
     showToast("Passwords don't match");
@@ -595,13 +665,13 @@ function showSeedPhrase() {
     return;
   }
 
-  const grid = document.getElementById('viewSeedGrid');
+  const grid = $('viewSeedGrid');
   grid.innerHTML = '';
 
   vault.seedPhrase.split(' ').forEach((word, i) => {
     const div = document.createElement('div');
     div.className = 'seed-word';
-    div.innerHTML = `<span>${i + 1}.</span>${word}`;
+    div.innerHTML = `<span>${i + 1}.</span>${escapeHtml(word)}`;
     grid.appendChild(div);
   });
 
@@ -618,8 +688,7 @@ async function copySeedPhrase() {
 }
 
 async function saveAdvancedSettings() {
-  const len =
-    parseInt(document.getElementById('hashLengthSetting').value) || 16;
+  const len = parseInt($('hashLengthSetting').value) || 16;
   vault.settings.hashLength = Math.max(8, Math.min(64, len));
   await VaultStorage.saveVault(vault);
   await syncStateToBackground();
@@ -644,11 +713,9 @@ function downloadData() {
 }
 
 // ============================================
-// Nostr Backup (simplified — no relay lib in extension context, use fetch-based)
+// Nostr Backup (stub)
 // ============================================
 async function backupToNostr(silent = false) {
-  // TODO: Port Nostr backup to extension context
-  // For now, show a message
   if (!silent) showToast('Nostr backup coming soon');
 }
 
@@ -671,9 +738,9 @@ function onSeedInput(event) {
     .trim()
     .split(/\s+/)
     .filter((w) => w.length > 0).length;
-  document.getElementById('wordCount').textContent = wordCount;
+  $('wordCount').textContent = wordCount;
 
-  const suggestions = document.getElementById('seedSuggestions');
+  const suggestions = $('seedSuggestions');
 
   if (currentWord.length < 1) {
     suggestions.classList.add('hidden');
@@ -699,21 +766,27 @@ function onSeedInput(event) {
 }
 
 function renderSuggestions(typed) {
-  const suggestions = document.getElementById('seedSuggestions');
-  suggestions.innerHTML = currentSuggestions
-    .map((word, i) => {
-      const matchPart = word.slice(0, typed.length);
-      const restPart = word.slice(typed.length);
-      return `<div class="seed-suggestion ${i === activeSuggestionIndex ? 'active' : ''}" 
-                   onclick="selectSuggestion('${word}')">
-          <span class="seed-suggestion-match">${matchPart}</span>${restPart}
-      </div>`;
-    })
-    .join('');
+  const suggestions = $('seedSuggestions');
+  suggestions.innerHTML = '';
+
+  currentSuggestions.forEach((word, i) => {
+    const div = document.createElement('div');
+    div.className = 'seed-suggestion' + (i === activeSuggestionIndex ? ' active' : '');
+
+    const matchSpan = document.createElement('span');
+    matchSpan.className = 'seed-suggestion-match';
+    matchSpan.textContent = word.slice(0, typed.length);
+
+    div.appendChild(matchSpan);
+    div.appendChild(document.createTextNode(word.slice(typed.length)));
+
+    div.addEventListener('click', () => selectSuggestion(word));
+    suggestions.appendChild(div);
+  });
 }
 
 function onSeedKeydown(event) {
-  const suggestions = document.getElementById('seedSuggestions');
+  const suggestions = $('seedSuggestions');
 
   if (
     suggestions.classList.contains('hidden') ||
@@ -745,7 +818,7 @@ function onSeedKeydown(event) {
 }
 
 function getCurrentTypedWord() {
-  const textarea = document.getElementById('restoreSeedInput');
+  const textarea = $('restoreSeedInput');
   const cursorPos = textarea.selectionStart;
   const beforeCursor = textarea.value.slice(0, cursorPos);
   const wordMatch = beforeCursor.match(/[a-z]+$/i);
@@ -753,7 +826,7 @@ function getCurrentTypedWord() {
 }
 
 function selectSuggestion(word) {
-  const textarea = document.getElementById('restoreSeedInput');
+  const textarea = $('restoreSeedInput');
   const cursorPos = textarea.selectionStart;
   const value = textarea.value;
 
@@ -769,12 +842,12 @@ function selectSuggestion(word) {
   textarea.setSelectionRange(newCursorPos, newCursorPos);
   textarea.focus();
 
-  document.getElementById('seedSuggestions').classList.add('hidden');
+  $('seedSuggestions').classList.add('hidden');
   currentSuggestions = [];
 
   const wordCount = newValue
     .trim()
     .split(/\s+/)
     .filter((w) => w.length > 0).length;
-  document.getElementById('wordCount').textContent = wordCount;
+  $('wordCount').textContent = wordCount;
 }

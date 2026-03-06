@@ -13,60 +13,60 @@
     <h1>Vault</h1>
     <p class="subtitle">Deterministic passwords.<br>No storage. Just math.</p>
     <div class="actions">
-      <button class="btn btn-primary" onclick="showScreen('newWalletScreen')">Create New Vault</button>
-      <button class="btn btn-secondary" onclick="showScreen('restoreScreen')">Restore from Seed</button>
-      <button class="btn btn-ghost" onclick="showScreen('unlockScreen')">Unlock Saved Vault</button>
+      <button class="btn btn-primary" id="btnNewVault">Create New Vault</button>
+      <button class="btn btn-secondary" id="btnRestore">Restore from Seed</button>
+      <button class="btn btn-ghost" id="btnUnlock">Unlock Saved Vault</button>
     </div>
   </div>
 
   <!-- New Wallet Screen -->
   <div id="newWalletScreen" class="screen hidden">
     <div class="header">
-      <button class="back-btn" onclick="goBack()">←</button>
+      <button class="back-btn" id="backFromNew">←</button>
       <h2>New Vault</h2>
     </div>
     <p class="info">Write down these 12 words. They are your master key.</p>
     <div id="seedGrid" class="seed-grid"></div>
-    <button class="btn btn-primary" onclick="confirmSeedBackup()">I've saved them</button>
+    <button class="btn btn-primary" id="btnConfirmSeed">I've saved them</button>
   </div>
 
   <!-- Verify Seed Screen -->
   <div id="verifySeedScreen" class="screen hidden">
     <div class="header">
-      <button class="back-btn" onclick="goBack()">←</button>
+      <button class="back-btn" id="backFromVerify">←</button>
       <h2>Verify Backup</h2>
     </div>
     <p class="info">Confirm a few words to make sure you saved them.</p>
     <div id="verifyInputs"></div>
-    <button class="btn btn-primary" onclick="verifySeedBackup()">Verify</button>
+    <button class="btn btn-primary" id="btnVerifySeed">Verify</button>
   </div>
 
   <!-- Restore Screen -->
   <div id="restoreScreen" class="screen hidden">
     <div class="header">
-      <button class="back-btn" onclick="goBack()">←</button>
+      <button class="back-btn" id="backFromRestore">←</button>
       <h2>Restore Vault</h2>
     </div>
     <div class="input-group">
       <label>Seed Phrase</label>
-      <textarea id="restoreSeedInput" rows="3" placeholder="Enter your 12 or 24 word seed phrase" oninput="onSeedInput(event)" onkeydown="onSeedKeydown(event)"></textarea>
+      <textarea id="restoreSeedInput" rows="3" placeholder="Enter your 12 or 24 word seed phrase"></textarea>
       <div id="seedSuggestions" class="suggestions hidden"></div>
       <div class="word-count">Words: <span id="wordCount">0</span></div>
     </div>
-    <button class="btn btn-primary" onclick="restoreFromSeed()">Restore</button>
+    <button class="btn btn-primary" id="btnRestoreSeed">Restore</button>
   </div>
 
   <!-- Unlock Screen -->
   <div id="unlockScreen" class="screen hidden">
     <div class="header">
-      <button class="back-btn" onclick="goBack()">←</button>
+      <button class="back-btn" id="backFromUnlockScreen">←</button>
       <h2>Unlock Vault</h2>
     </div>
     <div class="input-group">
       <label>Encryption Password</label>
-      <input type="password" id="unlockPassword" placeholder="Enter password" onkeydown="if(event.key==='Enter')unlockVault()">
+      <input type="password" id="unlockPassword" placeholder="Enter password">
     </div>
-    <button class="btn btn-primary" onclick="unlockVault()">Unlock</button>
+    <button class="btn btn-primary" id="btnUnlockVault">Unlock</button>
   </div>
 
   <!-- Main Screen (site list) -->
@@ -74,12 +74,12 @@
     <div class="header">
       <h2>Vault</h2>
       <div class="header-actions">
-        <button class="icon-btn" onclick="showScreen('settingsScreen')" title="Settings">⚙️</button>
-        <button class="icon-btn" onclick="lockVault()" title="Lock">🔒</button>
+        <button class="icon-btn" id="btnSettings" title="Settings">⚙️</button>
+        <button class="icon-btn" id="btnLock" title="Lock">🔒</button>
       </div>
     </div>
     <div class="search-bar">
-      <input type="text" id="siteSearch" placeholder="Search or add site..." oninput="filterSites()" onkeydown="handleSearchEnter(event)">
+      <input type="text" id="siteSearch" placeholder="Search or add site...">
     </div>
     <div id="siteList" class="site-list"></div>
     <div id="emptyState" class="empty-state hidden">
@@ -87,70 +87,70 @@
     </div>
     <div id="domainBanner" class="domain-banner hidden">
       <span id="domainBannerText"></span>
-      <button class="btn btn-sm btn-primary" onclick="openSiteFromBanner()">Generate</button>
+      <button class="btn btn-sm btn-primary" id="btnDomainBanner">Generate</button>
     </div>
   </div>
 
   <!-- Generate Screen -->
   <div id="generateScreen" class="screen hidden">
     <div class="header">
-      <button class="back-btn" onclick="goBack()">←</button>
+      <button class="back-btn" id="backFromGenerate">←</button>
       <h2>Generate</h2>
     </div>
     <div class="input-group">
       <label>Site</label>
-      <input type="text" id="genSite" placeholder="e.g. github.com" oninput="updatePassword()">
+      <input type="text" id="genSite" placeholder="e.g. github.com">
     </div>
     <div class="input-group">
       <label>Username / Email</label>
-      <input type="text" id="genUser" placeholder="e.g. you@email.com" oninput="updatePassword()">
+      <input type="text" id="genUser" placeholder="e.g. you@email.com">
     </div>
     <div class="password-display">
       <span id="genPassword">••••••••••••</span>
-      <button class="icon-btn" onclick="togglePasswordVisibility()"><span id="visibilityIcon">👁️</span></button>
+      <button class="icon-btn" id="btnToggleVis"><span id="visibilityIcon">👁️</span></button>
     </div>
     <div class="nonce-control">
       <label>Version</label>
       <div class="nonce-buttons">
-        <button class="btn btn-sm" onclick="decrementNonce()">−</button>
+        <button class="btn btn-sm" id="btnNonceDec">−</button>
         <span id="nonceDisplay">1</span>
-        <button class="btn btn-sm" onclick="incrementNonce()">+</button>
+        <button class="btn btn-sm" id="btnNonceInc">+</button>
       </div>
     </div>
     <div class="actions">
-      <button class="btn btn-primary" onclick="copyPassword()">Copy Password</button>
-      <button class="btn btn-secondary" onclick="fillPassword()">Fill on Page</button>
+      <button class="btn btn-primary" id="btnCopyPassword">Copy Password</button>
+      <button class="btn btn-secondary" id="btnFillPassword">Fill on Page</button>
     </div>
   </div>
 
   <!-- Settings Screen -->
   <div id="settingsScreen" class="screen hidden">
     <div class="header">
-      <button class="back-btn" onclick="goBack()">←</button>
+      <button class="back-btn" id="backFromSettings">←</button>
       <h2>Settings</h2>
     </div>
     <div class="settings-list">
-      <div class="setting-item" onclick="showScreen('encryptScreen')">
+      <div class="setting-item" id="settEncrypt">
         <span>💾 Save Encrypted</span>
         <span class="chevron">›</span>
       </div>
-      <div class="setting-item" onclick="showSeedPhrase()">
+      <div class="setting-item" id="settViewSeed">
         <span>🔑 View Seed Phrase</span>
         <span class="chevron">›</span>
       </div>
-      <div class="setting-item" onclick="showScreen('advancedScreen')">
+      <div class="setting-item" id="settAdvanced">
         <span>🔧 Advanced</span>
         <span class="chevron">›</span>
       </div>
-      <div class="setting-item" onclick="backupToNostr()">
+      <div class="setting-item" id="settNostrBackup">
         <span>☁️ Backup to Nostr</span>
         <span class="chevron">›</span>
       </div>
-      <div class="setting-item" onclick="restoreFromNostr()">
+      <div class="setting-item" id="settNostrRestore">
         <span>📥 Restore from Nostr</span>
         <span class="chevron">›</span>
       </div>
-      <div class="setting-item" onclick="downloadData()">
+      <div class="setting-item" id="settExport">
         <span>📦 Export JSON</span>
         <span class="chevron">›</span>
       </div>
@@ -160,7 +160,7 @@
   <!-- Encrypt Screen -->
   <div id="encryptScreen" class="screen hidden">
     <div class="header">
-      <button class="back-btn" onclick="goBack()">←</button>
+      <button class="back-btn" id="backFromEncrypt">←</button>
       <h2>Save Encrypted</h2>
     </div>
     <div class="input-group">
@@ -169,32 +169,32 @@
     </div>
     <div class="input-group">
       <label>Confirm Password</label>
-      <input type="password" id="encryptPass2" placeholder="Repeat password" onkeydown="if(event.key==='Enter')saveEncrypted()">
+      <input type="password" id="encryptPass2" placeholder="Repeat password">
     </div>
-    <button class="btn btn-primary" onclick="saveEncrypted()">Save</button>
+    <button class="btn btn-primary" id="btnSaveEncrypted">Save</button>
   </div>
 
   <!-- View Seed Screen -->
   <div id="viewSeedScreen" class="screen hidden">
     <div class="header">
-      <button class="back-btn" onclick="goBack()">←</button>
+      <button class="back-btn" id="backFromViewSeed">←</button>
       <h2>Seed Phrase</h2>
     </div>
     <div id="viewSeedGrid" class="seed-grid"></div>
-    <button class="btn btn-secondary" onclick="copySeedPhrase()">Copy</button>
+    <button class="btn btn-secondary" id="btnCopySeed">Copy</button>
   </div>
 
   <!-- Advanced Screen -->
   <div id="advancedScreen" class="screen hidden">
     <div class="header">
-      <button class="back-btn" onclick="goBack()">←</button>
+      <button class="back-btn" id="backFromAdvanced">←</button>
       <h2>Advanced</h2>
     </div>
     <div class="input-group">
       <label>Hash Length</label>
       <input type="number" id="hashLengthSetting" min="8" max="64" value="16">
     </div>
-    <button class="btn btn-primary" onclick="saveAdvancedSettings()">Save</button>
+    <button class="btn btn-primary" id="btnSaveAdvanced">Save</button>
   </div>
 
   <!-- Toast -->
