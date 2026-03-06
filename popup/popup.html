@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vault</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <!-- Welcome Screen -->
+  <div id="welcomeScreen" class="screen">
+    <div class="logo">🔐</div>
+    <h1>Vault</h1>
+    <p class="subtitle">Deterministic passwords.<br>No storage. Just math.</p>
+    <div class="actions">
+      <button class="btn btn-primary" onclick="showScreen('newWalletScreen')">Create New Vault</button>
+      <button class="btn btn-secondary" onclick="showScreen('restoreScreen')">Restore from Seed</button>
+      <button class="btn btn-ghost" onclick="showScreen('unlockScreen')">Unlock Saved Vault</button>
+    </div>
+  </div>
+
+  <!-- New Wallet Screen -->
+  <div id="newWalletScreen" class="screen hidden">
+    <div class="header">
+      <button class="back-btn" onclick="goBack()">←</button>
+      <h2>New Vault</h2>
+    </div>
+    <p class="info">Write down these 12 words. They are your master key.</p>
+    <div id="seedGrid" class="seed-grid"></div>
+    <button class="btn btn-primary" onclick="confirmSeedBackup()">I've saved them</button>
+  </div>
+
+  <!-- Verify Seed Screen -->
+  <div id="verifySeedScreen" class="screen hidden">
+    <div class="header">
+      <button class="back-btn" onclick="goBack()">←</button>
+      <h2>Verify Backup</h2>
+    </div>
+    <p class="info">Confirm a few words to make sure you saved them.</p>
+    <div id="verifyInputs"></div>
+    <button class="btn btn-primary" onclick="verifySeedBackup()">Verify</button>
+  </div>
+
+  <!-- Restore Screen -->
+  <div id="restoreScreen" class="screen hidden">
+    <div class="header">
+      <button class="back-btn" onclick="goBack()">←</button>
+      <h2>Restore Vault</h2>
+    </div>
+    <div class="input-group">
+      <label>Seed Phrase</label>
+      <textarea id="restoreSeedInput" rows="3" placeholder="Enter your 12 or 24 word seed phrase" oninput="onSeedInput(event)" onkeydown="onSeedKeydown(event)"></textarea>
+      <div id="seedSuggestions" class="suggestions hidden"></div>
+      <div class="word-count">Words: <span id="wordCount">0</span></div>
+    </div>
+    <button class="btn btn-primary" onclick="restoreFromSeed()">Restore</button>
+  </div>
+
+  <!-- Unlock Screen -->
+  <div id="unlockScreen" class="screen hidden">
+    <div class="header">
+      <button class="back-btn" onclick="goBack()">←</button>
+      <h2>Unlock Vault</h2>
+    </div>
+    <div class="input-group">
+      <label>Encryption Password</label>
+      <input type="password" id="unlockPassword" placeholder="Enter password" onkeydown="if(event.key==='Enter')unlockVault()">
+    </div>
+    <button class="btn btn-primary" onclick="unlockVault()">Unlock</button>
+  </div>
+
+  <!-- Main Screen (site list) -->
+  <div id="mainScreen" class="screen hidden">
+    <div class="header">
+      <h2>Vault</h2>
+      <div class="header-actions">
+        <button class="icon-btn" onclick="showScreen('settingsScreen')" title="Settings">⚙️</button>
+        <button class="icon-btn" onclick="lockVault()" title="Lock">🔒</button>
+      </div>
+    </div>
+    <div class="search-bar">
+      <input type="text" id="siteSearch" placeholder="Search or add site..." oninput="filterSites()" onkeydown="handleSearchEnter(event)">
+    </div>
+    <div id="siteList" class="site-list"></div>
+    <div id="emptyState" class="empty-state hidden">
+      <p>No sites yet.<br>Search a domain and press Enter to add one.</p>
+    </div>
+    <div id="domainBanner" class="domain-banner hidden">
+      <span id="domainBannerText"></span>
+      <button class="btn btn-sm btn-primary" onclick="openSiteFromBanner()">Generate</button>
+    </div>
+  </div>
+
+  <!-- Generate Screen -->
+  <div id="generateScreen" class="screen hidden">
+    <div class="header">
+      <button class="back-btn" onclick="goBack()">←</button>
+      <h2>Generate</h2>
+    </div>
+    <div class="input-group">
+      <label>Site</label>
+      <input type="text" id="genSite" placeholder="e.g. github.com" oninput="updatePassword()">
+    </div>
+    <div class="input-group">
+      <label>Username / Email</label>
+      <input type="text" id="genUser" placeholder="e.g. you@email.com" oninput="updatePassword()">
+    </div>
+    <div class="password-display">
+      <span id="genPassword">••••••••••••</span>
+      <button class="icon-btn" onclick="togglePasswordVisibility()"><span id="visibilityIcon">👁️</span></button>
+    </div>
+    <div class="nonce-control">
+      <label>Version</label>
+      <div class="nonce-buttons">
+        <button class="btn btn-sm" onclick="decrementNonce()">−</button>
+        <span id="nonceDisplay">1</span>
+        <button class="btn btn-sm" onclick="incrementNonce()">+</button>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary" onclick="copyPassword()">Copy Password</button>
+      <button class="btn btn-secondary" onclick="fillPassword()">Fill on Page</button>
+    </div>
+  </div>
+
+  <!-- Settings Screen -->
+  <div id="settingsScreen" class="screen hidden">
+    <div class="header">
+      <button class="back-btn" onclick="goBack()">←</button>
+      <h2>Settings</h2>
+    </div>
+    <div class="settings-list">
+      <div class="setting-item" onclick="showScreen('encryptScreen')">
+        <span>💾 Save Encrypted</span>
+        <span class="chevron">›</span>
+      </div>
+      <div class="setting-item" onclick="showSeedPhrase()">
+        <span>🔑 View Seed Phrase</span>
+        <span class="chevron">›</span>
+      </div>
+      <div class="setting-item" onclick="showScreen('advancedScreen')">
+        <span>🔧 Advanced</span>
+        <span class="chevron">›</span>
+      </div>
+      <div class="setting-item" onclick="backupToNostr()">
+        <span>☁️ Backup to Nostr</span>
+        <span class="chevron">›</span>
+      </div>
+      <div class="setting-item" onclick="restoreFromNostr()">
+        <span>📥 Restore from Nostr</span>
+        <span class="chevron">›</span>
+      </div>
+      <div class="setting-item" onclick="downloadData()">
+        <span>📦 Export JSON</span>
+        <span class="chevron">›</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Encrypt Screen -->
+  <div id="encryptScreen" class="screen hidden">
+    <div class="header">
+      <button class="back-btn" onclick="goBack()">←</button>
+      <h2>Save Encrypted</h2>
+    </div>
+    <div class="input-group">
+      <label>Password</label>
+      <input type="password" id="encryptPass1" placeholder="Choose a password">
+    </div>
+    <div class="input-group">
+      <label>Confirm Password</label>
+      <input type="password" id="encryptPass2" placeholder="Repeat password" onkeydown="if(event.key==='Enter')saveEncrypted()">
+    </div>
+    <button class="btn btn-primary" onclick="saveEncrypted()">Save</button>
+  </div>
+
+  <!-- View Seed Screen -->
+  <div id="viewSeedScreen" class="screen hidden">
+    <div class="header">
+      <button class="back-btn" onclick="goBack()">←</button>
+      <h2>Seed Phrase</h2>
+    </div>
+    <div id="viewSeedGrid" class="seed-grid"></div>
+    <button class="btn btn-secondary" onclick="copySeedPhrase()">Copy</button>
+  </div>
+
+  <!-- Advanced Screen -->
+  <div id="advancedScreen" class="screen hidden">
+    <div class="header">
+      <button class="back-btn" onclick="goBack()">←</button>
+      <h2>Advanced</h2>
+    </div>
+    <div class="input-group">
+      <label>Hash Length</label>
+      <input type="number" id="hashLengthSetting" min="8" max="64" value="16">
+    </div>
+    <button class="btn btn-primary" onclick="saveAdvancedSettings()">Save</button>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast"></div>
+
+  <!-- Loading Modal -->
+  <div id="loadingModal" class="loading-modal hidden">
+    <div class="loading-content">
+      <div class="spinner"></div>
+      <p id="loadingText">Loading...</p>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="../lib/crypto-js.min.js"></script>
+  <script src="../lib/bip39WordList.js"></script>
+  <script src="../lib/nostr-tools.min.js"></script>
+  <script src="../lib/vault-core.js"></script>
+  <script src="../lib/vault-storage.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
