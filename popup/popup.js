@@ -18,6 +18,11 @@ let originalNonce = 0;
 let passwordVisible = false;
 let navigationStack = ['welcomeScreen'];
 let currentTabDomain = null;
+let clipboardClearTimer = null;
+let unlockAttempts = 0;
+let unlockLockoutUntil = 0;
+const MAX_UNLOCK_ATTEMPTS = 5;
+const UNLOCK_LOCKOUT_MS = 30 * 1000;
 
 // Autocomplete state
 let activeSuggestionIndex = -1;
@@ -104,6 +109,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('settNostrBackup').addEventListener('click', () => backupToNostr());
   $('settNostrRestore').addEventListener('click', restoreFromNostr);
   $('settExport').addEventListener('click', downloadData);
+  $('settImport').addEventListener('click', triggerImport);
 
   // Encrypt screen
   $('backFromEncrypt').addEventListener('click', goBack);
@@ -119,6 +125,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Advanced
   $('backFromAdvanced').addEventListener('click', goBack);
   $('btnSaveAdvanced').addEventListener('click', saveAdvancedSettings);
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', (e) => {
+    const genScreen = $('generateScreen');
+    if (genScreen.classList.contains('hidden')) return;
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'Enter') { e.preventDefault(); copyPassword(); }
+    if (e.key === 'Escape') { e.preventDefault(); showScreen('mainScreen'); }
+  });
 });
 
 // Shorthand
@@ -282,9 +297,35 @@ async function initializeVault(seedPhrase) {
 
   // Sync vault state to background service worker
   await syncStateToBackground();
+
+  // Auto-sync from Nostr (silent)
+  checkForRemoteBackups();
 }
 
-async function lockVault() {
+async function checkForRemoteBackups() {
+  try {
+    const data = await VaultStorage.restoreFromNostr(vault.privateKey);
+    if (data) {
+      vault.users = { ...vault.users, ...data.users };
+      if (data.settings) vault.settings = { ...vault.settings, ...data.settings };
+      await VaultStorage.saveVault(vault);
+      await syncStateToBackground();
+      renderSiteList();
+      showToast('Synced from cloud backup!');
+    }
+  } catch (e) {
+    console.error('Remote backup check failed:', e);
+  }
+}
+
+async function lockVault(skipConfirm = false) {
+  if (!skipConfirm && vault.privateKey) {
+    if (!confirm('Lock vault? Make sure you have your seed phrase saved.')) return;
+  }
+  if (clipboardClearTimer) clearTimeout(clipboardClearTimer);
+  clipboardClearTimer = null;
+  navigator.clipboard.writeText('').catch(() => {});
+
   vault = {
     privateKey: '',
     seedPhrase: '',
@@ -393,14 +434,33 @@ function renderSiteList() {
     div.className = 'site-item';
     if (s.site === currentTabDomain) div.classList.add('current-site');
 
-    div.innerHTML = `
-      <div class="site-icon">${escapeHtml(s.site.charAt(0))}</div>
-      <div class="site-info">
-        <div class="site-name">${escapeHtml(s.site)}</div>
-        <div class="site-user">${escapeHtml(s.user)}</div>
-      </div>
-    `;
+    const icon = document.createElement('div');
+    icon.className = 'site-icon';
+    icon.textContent = s.site.charAt(0).toUpperCase();
 
+    const info = document.createElement('div');
+    info.className = 'site-info';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'site-name';
+    nameEl.textContent = s.site;
+    const userEl = document.createElement('div');
+    userEl.className = 'site-user';
+    userEl.textContent = s.user;
+    info.appendChild(nameEl);
+    info.appendChild(userEl);
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn-delete';
+    delBtn.textContent = '✕';
+    delBtn.title = 'Delete';
+    delBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteSite(s.site, s.user);
+    });
+
+    div.appendChild(icon);
+    div.appendChild(info);
+    div.appendChild(delBtn);
     div.addEventListener('click', () => openSite(s.site, s.user, s.nonce));
     container.appendChild(div);
   });
@@ -439,6 +499,13 @@ function openSite(site, user, nonce) {
   $('visibilityIcon').textContent = '👁️';
   updateNonceIndicator();
 
+  // Always show strength
+  const strengthEl = $('passwordStrength');
+  if (strengthEl) {
+    const s = VaultCore.getPasswordStrength(vault.settings.hashLength || 16);
+    strengthEl.innerHTML = `<span style="color:${s.color}">● ${s.label}</span> · ${s.bits}-bit · ${s.len} chars`;
+  }
+
   if (site && user) {
     updatePassword();
   }
@@ -458,22 +525,24 @@ function updateNonceIndicator() {
 function updatePassword() {
   const site = $('genSite').value.trim();
   const user = $('genUser').value.trim();
+  const strengthEl = $('passwordStrength');
 
   if (!site || !user || !vault.privateKey) {
     $('genPassword').textContent = '••••••••••••';
+    if (strengthEl) strengthEl.textContent = '';
     return;
   }
 
-  const pass = VaultCore.generatePassword(
-    vault.privateKey,
-    user,
-    site,
-    currentNonce,
-    vault.settings.hashLength || 16
-  );
+  const hl = vault.settings.hashLength || 16;
+  const pass = VaultCore.generatePassword(vault.privateKey, user, site, currentNonce, hl);
 
   if (passwordVisible) {
     $('genPassword').textContent = pass;
+  }
+
+  if (strengthEl) {
+    const s = VaultCore.getPasswordStrength(hl);
+    strengthEl.innerHTML = `<span style="color:${s.color}">● ${s.label}</span> · ${s.bits}-bit · ${s.len} chars`;
   }
 }
 
@@ -530,6 +599,11 @@ async function copyPassword() {
   try {
     await navigator.clipboard.writeText(pass);
     showToast('Saved & copied!');
+    // Auto-clear clipboard after 30 seconds
+    if (clipboardClearTimer) clearTimeout(clipboardClearTimer);
+    clipboardClearTimer = setTimeout(() => {
+      navigator.clipboard.writeText('').catch(() => {});
+    }, 30000);
   } catch {
     showToast('Copy failed');
   }
@@ -537,6 +611,8 @@ async function copyPassword() {
   // Persist
   await VaultStorage.saveVault(vault);
   await syncStateToBackground();
+  // Silent Nostr backup
+  VaultStorage.backupToNostr(vault).catch(e => console.error('Silent backup failed:', e));
 }
 
 async function fillPassword() {
@@ -588,6 +664,14 @@ async function fillPassword() {
 // Encryption
 // ============================================
 async function unlockVault() {
+  // Rate limiting
+  const now = Date.now();
+  if (now < unlockLockoutUntil) {
+    const secs = Math.ceil((unlockLockoutUntil - now) / 1000);
+    showToast(`Too many attempts. Wait ${secs}s`);
+    return;
+  }
+
   const password = $('unlockPassword').value;
   if (!password) {
     showToast('Enter password');
@@ -600,7 +684,14 @@ async function unlockVault() {
     const encrypted = stored[key];
 
     if (!encrypted) {
-      showToast('No vault found for this password');
+      unlockAttempts++;
+      if (unlockAttempts >= MAX_UNLOCK_ATTEMPTS) {
+        unlockLockoutUntil = Date.now() + UNLOCK_LOCKOUT_MS;
+        unlockAttempts = 0;
+        showToast('Too many attempts. Locked for 30s');
+      } else {
+        showToast(`Wrong password (${MAX_UNLOCK_ATTEMPTS - unlockAttempts} attempts left)`);
+      }
       return;
     }
 
@@ -618,12 +709,20 @@ async function unlockVault() {
       vault = data;
     }
 
+    unlockAttempts = 0;
     await syncStateToBackground();
     showToast('Vault unlocked!');
     showScreen('mainScreen');
   } catch (e) {
     console.error(e);
-    showToast('Invalid password');
+    unlockAttempts++;
+    if (unlockAttempts >= MAX_UNLOCK_ATTEMPTS) {
+      unlockLockoutUntil = Date.now() + UNLOCK_LOCKOUT_MS;
+      unlockAttempts = 0;
+      showToast('Too many attempts. Locked for 30s');
+    } else {
+      showToast('Invalid password');
+    }
   }
 }
 
@@ -713,14 +812,116 @@ function downloadData() {
 }
 
 // ============================================
-// Nostr Backup (stub)
+// Site Management
+// ============================================
+async function deleteSite(site, user) {
+  if (!confirm(`Delete ${site} (${user})?`)) return;
+
+  if (vault.users[user]) {
+    delete vault.users[user][site];
+    if (Object.keys(vault.users[user]).length === 0) {
+      delete vault.users[user];
+    }
+  }
+
+  showToast('Site deleted');
+  renderSiteList();
+  await VaultStorage.saveVault(vault);
+  await syncStateToBackground();
+  VaultStorage.backupToNostr(vault).catch(e => console.error('Silent backup failed:', e));
+}
+
+// ============================================
+// Import
+// ============================================
+function triggerImport() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json,application/json';
+  input.onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      if (!data.users || typeof data.users !== 'object') {
+        showToast('Invalid vault file');
+        return;
+      }
+      const siteCount = Object.values(data.users).reduce((n, u) => n + Object.keys(u).length, 0);
+      if (!confirm(`Import ${siteCount} site(s)? This will merge with your current vault.`)) return;
+      Object.entries(data.users).forEach(([user, sites]) => {
+        if (!vault.users[user]) vault.users[user] = {};
+        Object.entries(sites).forEach(([site, nonce]) => {
+          if (vault.users[user][site] === undefined || nonce > vault.users[user][site]) {
+            vault.users[user][site] = nonce;
+          }
+        });
+      });
+      if (data.settings) vault.settings = { ...vault.settings, ...data.settings };
+      renderSiteList();
+      await VaultStorage.saveVault(vault);
+      await syncStateToBackground();
+      VaultStorage.backupToNostr(vault).catch(e => console.error('Backup failed:', e));
+      showToast(`Imported ${siteCount} site(s)!`);
+    } catch (err) {
+      console.error(err);
+      showToast('Failed to import file');
+    }
+  };
+  input.click();
+}
+
+// ============================================
+// Nostr Backup — NIP-44 + kind:30078
 // ============================================
 async function backupToNostr(silent = false) {
-  if (!silent) showToast('Nostr backup coming soon');
+  if (!vault.privateKey) {
+    if (!silent) showToast('Vault not initialized');
+    return;
+  }
+
+  if (!silent) showLoading('Backing up to Nostr...');
+
+  const result = await VaultStorage.backupToNostr(vault);
+
+  if (!silent) {
+    hideLoading();
+    if (result.success > 0) {
+      showToast(`Backed up to ${result.success} relay(s)`);
+    } else {
+      showToast('Backup failed');
+    }
+  }
 }
 
 async function restoreFromNostr() {
-  showToast('Nostr restore coming soon');
+  if (!vault.privateKey) {
+    showToast('Vault not initialized');
+    return;
+  }
+
+  showLoading('Restoring from Nostr...');
+
+  try {
+    const data = await VaultStorage.restoreFromNostr(vault.privateKey);
+    hideLoading();
+
+    if (data) {
+      vault.users = { ...vault.users, ...data.users };
+      if (data.settings) vault.settings = { ...vault.settings, ...data.settings };
+      renderSiteList();
+      await VaultStorage.saveVault(vault);
+      await syncStateToBackground();
+      showToast('Restored from Nostr!');
+    } else {
+      showToast('No backup found');
+    }
+  } catch (e) {
+    console.error(e);
+    hideLoading();
+    showToast('Restore error');
+  }
 }
 
 // ============================================

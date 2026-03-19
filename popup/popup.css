@@ -498,6 +498,43 @@ h1 {
   to { transform: rotate(360deg); }
 }
 
+/* Delete Button */
+.btn-delete {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  opacity: 0;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.site-item:hover .btn-delete {
+  opacity: 1;
+}
+
+.btn-delete:hover {
+  color: var(--danger);
+  background: rgba(255, 77, 106, 0.1);
+}
+
+/* Current Site Highlight */
+.current-site {
+  border: 1px solid var(--primary);
+}
+
+/* Password Strength */
+.password-strength {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: -12px;
+  margin-bottom: 16px;
+  text-align: center;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 4px;
