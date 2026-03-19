@@ -42,7 +42,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     console.error('Could not get tab:', e);
   }
 
-  // Check if vault is unlocked in background
+  // Check if vault is unlocked in background (service worker still alive)
   try {
     const response = await chrome.runtime.sendMessage({ type: 'GET_VAULT_STATE' });
     if (response?.unlocked) {
@@ -51,10 +51,22 @@ document.addEventListener('DOMContentLoaded', async () => {
       vault.users = response.users || {};
       vault.settings = response.settings || { hashLength: 16 };
       showScreen('mainScreen');
+      // Sync from Nostr in background (with loading indicator)
+      syncFromNostrWithUI();
     }
   } catch (e) {
     console.error('Background check failed:', e);
   }
+
+  // Check if there's an encrypted vault saved (show unlock button prominently)
+  try {
+    const stored = await VaultStorage.getEncrypted();
+    if (stored && Object.keys(stored).length > 0) {
+      // There's a saved vault — highlight unlock option
+      $('btnUnlock').classList.add('btn-primary');
+      $('btnUnlock').classList.remove('btn-ghost');
+    }
+  } catch (e) {}
 
   // ---- Bind all event listeners ----
 
@@ -111,7 +123,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('settExport').addEventListener('click', downloadData);
   $('settImport').addEventListener('click', triggerImport);
 
-  // Encrypt screen
+  // Setup encrypt screen (first-time)
+  $('setupEncryptPass2').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') setupEncryptAndContinue();
+  });
+  $('btnSetupEncrypt').addEventListener('click', setupEncryptAndContinue);
+
+  // Encrypt screen (settings)
   $('backFromEncrypt').addEventListener('click', goBack);
   $('encryptPass2').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') saveEncrypted();
@@ -261,7 +279,8 @@ async function verifySeedBackup() {
 
   if (valid) {
     await initializeVault(vault.seedPhrase);
-    showScreen('mainScreen');
+    // Prompt to set encryption password before going to main screen
+    showScreen('setupEncryptScreen');
   } else {
     showToast('Incorrect words. Try again.');
   }
@@ -277,7 +296,8 @@ async function restoreFromSeed() {
   }
 
   await initializeVault(input);
-  showScreen('mainScreen');
+  // Prompt to set encryption password
+  showScreen('setupEncryptScreen');
 }
 
 // ============================================
@@ -297,12 +317,17 @@ async function initializeVault(seedPhrase) {
 
   // Sync vault state to background service worker
   await syncStateToBackground();
-
-  // Auto-sync from Nostr (silent)
-  checkForRemoteBackups();
 }
 
-async function checkForRemoteBackups() {
+/**
+ * Sync from Nostr with visible loading indicator.
+ * Called after vault is initialized and main screen is shown.
+ */
+async function syncFromNostrWithUI() {
+  if (!vault.privateKey) return;
+
+  updateRelayStatus('syncing');
+
   try {
     const data = await VaultStorage.restoreFromNostr(vault.privateKey);
     if (data) {
@@ -311,11 +336,27 @@ async function checkForRemoteBackups() {
       await VaultStorage.saveVault(vault);
       await syncStateToBackground();
       renderSiteList();
-      showToast('Synced from cloud backup!');
+      updateRelayStatus('connected');
+      showToast('Synced from Nostr!');
+    } else {
+      updateRelayStatus('connected');
     }
   } catch (e) {
     console.error('Remote backup check failed:', e);
+    updateRelayStatus('offline');
   }
+}
+
+/**
+ * Update the relay status orb indicator.
+ */
+function updateRelayStatus(status) {
+  const orb = $('relayStatus');
+  if (!orb) return;
+  orb.className = 'relay-orb relay-' + status;
+  orb.title = status === 'syncing' ? 'Syncing with relays...'
+    : status === 'connected' ? 'Connected to relays'
+    : 'Offline';
 }
 
 async function lockVault(skipConfirm = false) {
@@ -349,6 +390,25 @@ async function syncStateToBackground() {
       settings: vault.settings,
     },
   });
+}
+
+/**
+ * Re-encrypt and save the vault to chrome.storage.local.
+ * This keeps the encrypted blob up-to-date when sites/settings change,
+ * so the vault survives service worker restarts and extension updates.
+ */
+async function autoSaveEncrypted() {
+  try {
+    const stored = await VaultStorage.getEncrypted();
+    if (!stored || Object.keys(stored).length === 0) return; // No saved vault yet
+    // We can't re-encrypt without the password, but we can update the
+    // non-sensitive site data in chrome.storage.local (VaultStorage.saveVault).
+    // The encrypted blob gets updated when user explicitly saves from settings,
+    // or on first setup. For now, persist non-sensitive data.
+    await VaultStorage.saveVault(vault);
+  } catch (e) {
+    console.error('Auto-save failed:', e);
+  }
 }
 
 // ============================================
@@ -713,6 +773,8 @@ async function unlockVault() {
     await syncStateToBackground();
     showToast('Vault unlocked!');
     showScreen('mainScreen');
+    // Sync from Nostr after unlock
+    syncFromNostrWithUI();
   } catch (e) {
     console.error(e);
     unlockAttempts++;
@@ -724,6 +786,45 @@ async function unlockVault() {
       showToast('Invalid password');
     }
   }
+}
+
+/**
+ * First-time setup: save encrypted vault and proceed to main screen.
+ */
+async function setupEncryptAndContinue() {
+  const pass1 = $('setupEncryptPass1').value;
+  const pass2 = $('setupEncryptPass2').value;
+
+  if (!pass1 || pass1 !== pass2) {
+    showToast("Passwords don't match");
+    return;
+  }
+
+  if (pass1.length < 4) {
+    showToast('Password too short');
+    return;
+  }
+
+  const key = VaultCore.hash(pass1);
+  const saveData = {
+    privateKey: vault.privateKey,
+    seedPhrase: vault.seedPhrase,
+    users: vault.users,
+    settings: vault.settings,
+  };
+  const encrypted = CryptoJS.AES.encrypt(
+    JSON.stringify(saveData),
+    pass1
+  ).toString();
+
+  const stored = await VaultStorage.getEncrypted();
+  stored[key] = encrypted;
+  await VaultStorage.saveEncrypted(stored);
+
+  showToast('Vault saved securely!');
+  showScreen('mainScreen');
+  // Now sync from Nostr
+  syncFromNostrWithUI();
 }
 
 async function saveEncrypted() {

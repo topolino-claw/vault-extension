@@ -69,11 +69,29 @@
     <button class="btn btn-primary" id="btnUnlockVault">Unlock</button>
   </div>
 
+  <!-- Setup Encrypt Screen (first-time, mandatory) -->
+  <div id="setupEncryptScreen" class="screen hidden">
+    <div class="header">
+      <h2>🔐 Set Password</h2>
+    </div>
+    <p class="info">Choose a password to encrypt your vault locally. You'll need this to unlock after browser restarts or extension updates.</p>
+    <div class="input-group">
+      <label>Password</label>
+      <input type="password" id="setupEncryptPass1" placeholder="Choose a strong password">
+    </div>
+    <div class="input-group">
+      <label>Confirm Password</label>
+      <input type="password" id="setupEncryptPass2" placeholder="Repeat password">
+    </div>
+    <button class="btn btn-primary" id="btnSetupEncrypt">Save & Continue</button>
+  </div>
+
   <!-- Main Screen (site list) -->
   <div id="mainScreen" class="screen hidden">
     <div class="header">
       <h2>Vault</h2>
       <div class="header-actions">
+        <span id="relayStatus" class="relay-orb" title="Relay status"></span>
         <button class="icon-btn" id="btnSettings" title="Settings">⚙️</button>
         <button class="icon-btn" id="btnLock" title="Lock">🔒</button>
       </div>

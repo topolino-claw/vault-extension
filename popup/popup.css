@@ -526,6 +526,36 @@ h1 {
   border: 1px solid var(--primary);
 }
 
+/* Relay Status Orb */
+.relay-orb {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  background: var(--text-muted);
+  transition: background 0.3s;
+  flex-shrink: 0;
+  margin-right: 2px;
+}
+
+.relay-syncing {
+  background: #f59e0b;
+  animation: pulse-orb 1s ease-in-out infinite;
+}
+
+.relay-connected {
+  background: var(--success);
+}
+
+.relay-offline {
+  background: var(--danger);
+}
+
+@keyframes pulse-orb {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
 /* Password Strength */
 .password-strength {
   font-size: 11px;
