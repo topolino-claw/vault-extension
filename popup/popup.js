@@ -1,36 +1,130 @@
 /**
- * Vault Chrome Extension — Popup Logic
- * All event handlers registered via addEventListener (MV3 CSP compliance)
+ * @fileoverview Vault Chrome Extension — Popup Logic
+ *
+ * This file drives the entire popup UI. It is a single-page application with
+ * a stack-based navigation model: screens are hidden/shown by toggling the
+ * `.hidden` class; the `navigationStack` array tracks where the user can go
+ * "back" to.
+ *
+ * ─── UI State Machine ────────────────────────────────────────────────────────
+ *
+ *   welcomeScreen
+ *     ├── newWalletScreen → verifySeedScreen → setupEncryptScreen → mainScreen
+ *     ├── restoreScreen                      → setupEncryptScreen → mainScreen
+ *     └── unlockScreen                                            → mainScreen
+ *
+ *   mainScreen
+ *     ├── generateScreen (open a site or add new one)
+ *     └── settingsScreen
+ *           ├── encryptScreen
+ *           ├── viewSeedScreen
+ *           ├── advancedScreen
+ *           └── (Nostr backup/restore — inline, no dedicated screen)
+ *
+ * ─── Dependencies (script load order in popup.html) ─────────────────────────
+ *   1. crypto-js.min.js    — CryptoJS AES + SHA256 (synchronous hashing)
+ *   2. bip39WordList.js    — exposes global `words` array (2048 BIP39 words)
+ *   3. nostr-tools.min.js  — exposes global `NostrTools` for relay/NIP ops
+ *   4. vault-core.js       — exposes global `VaultCore` (password generation)
+ *   5. vault-storage.js    — exposes global `VaultStorage` (chrome.storage wrapper)
+ *   6. popup.js            — this file
+ *
+ * All event listeners are registered via `addEventListener` (not inline `onclick`)
+ * to comply with the Manifest V3 Content Security Policy that forbids inline scripts.
  */
 
-// ============================================
-// State
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
+// Module-level state
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The in-memory vault object for the current popup session.
+ * Populated from chrome.storage.local (encrypted blob or cached background state)
+ * on open; cleared on lock.
+ *
+ * @type {{ privateKey: string, seedPhrase: string, users: Object.<string, Object.<string, number>>, settings: { hashLength: number } }}
+ */
 let vault = {
   privateKey: '',
   seedPhrase: '',
+  /** users[username][site] = nonce (version number, 0-based) */
   users: {},
   settings: { hashLength: 16 },
 };
 
+/** Current nonce (version) value displayed on the generate screen. @type {number} */
 let currentNonce = 0;
+
+/**
+ * The nonce value when the generate screen was opened (or when the password was
+ * last copied/filled). Used to detect unsaved nonce changes (visual indicator).
+ * @type {number}
+ */
 let originalNonce = 0;
+
+/** Whether the generated password is currently shown in plaintext. @type {boolean} */
 let passwordVisible = false;
+
+/**
+ * Navigation breadcrumb stack. Each entry is a screen element ID.
+ * `goBack()` pops the current screen and shows the previous one.
+ * @type {string[]}
+ */
 let navigationStack = ['welcomeScreen'];
+
+/**
+ * The registrable domain of the active browser tab when the popup opened.
+ * Used for the domain banner and to highlight matching sites in the list.
+ * @type {string|null}
+ */
 let currentTabDomain = null;
+
+/**
+ * Reference to the pending `setTimeout` that clears the clipboard after 30s.
+ * Stored so it can be cancelled when the vault is locked.
+ * @type {number|null}
+ */
 let clipboardClearTimer = null;
+
+/** Consecutive failed unlock attempts (for rate limiting). @type {number} */
 let unlockAttempts = 0;
+
+/**
+ * `Date.now()` timestamp at which the unlock lockout expires.
+ * 0 means no active lockout.
+ * @type {number}
+ */
 let unlockLockoutUntil = 0;
+
+/** Maximum failed attempts before triggering a lockout. @type {number} */
 const MAX_UNLOCK_ATTEMPTS = 5;
+
+/** Lockout duration in milliseconds after too many failed unlock attempts. @type {number} */
 const UNLOCK_LOCKOUT_MS = 30 * 1000;
 
-// Autocomplete state
+// ── BIP39 autocomplete state ──
+/** Index of the currently highlighted suggestion (keyboard navigation). @type {number} */
 let activeSuggestionIndex = -1;
+
+/** Current list of word suggestions shown in the autocomplete dropdown. @type {string[]} */
 let currentSuggestions = [];
 
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
 // Init & Event Binding
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Entry point — runs once the popup DOM is ready.
+ *
+ * Sequence:
+ *   1. Get the current tab's domain (for autofill context).
+ *   2. Check if the vault is already unlocked in the background service worker.
+ *      If yes, skip the welcome screen and go directly to the main screen.
+ *   3. Check if an encrypted vault blob exists in storage (to style the Unlock button).
+ *   4. Bind all button/input event listeners (MV3 requires addEventListener, not onclick).
+ *
+ * @listens DOMContentLoaded
+ */
 document.addEventListener('DOMContentLoaded', async () => {
   // Get current tab domain
   try {
@@ -68,7 +162,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   } catch (e) {}
 
-  // ---- Bind all event listeners ----
+  // ── Bind all event listeners ──
 
   // Welcome screen
   $('btnNewVault').addEventListener('click', () => showScreen('newWalletScreen'));
@@ -123,13 +217,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('settExport').addEventListener('click', downloadData);
   $('settImport').addEventListener('click', triggerImport);
 
-  // Setup encrypt screen (first-time)
+  // Setup encrypt screen (first-time mandatory step)
   $('setupEncryptPass2').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') setupEncryptAndContinue();
   });
   $('btnSetupEncrypt').addEventListener('click', setupEncryptAndContinue);
 
-  // Encrypt screen (settings)
+  // Encrypt screen (re-encrypt from settings)
   $('backFromEncrypt').addEventListener('click', goBack);
   $('encryptPass2').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') saveEncrypted();
@@ -144,7 +238,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('backFromAdvanced').addEventListener('click', goBack);
   $('btnSaveAdvanced').addEventListener('click', saveAdvancedSettings);
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts (active only when the generate screen is visible)
   document.addEventListener('keydown', (e) => {
     const genScreen = $('generateScreen');
     if (genScreen.classList.contains('hidden')) return;
@@ -154,14 +248,33 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 });
 
-// Shorthand
+/**
+ * Shorthand helper: `$(id)` is equivalent to `document.getElementById(id)`.
+ *
+ * @param  {string} id - The element's `id` attribute.
+ * @returns {HTMLElement|null} The DOM element, or null if not found.
+ */
 function $(id) {
   return document.getElementById(id);
 }
 
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
 // Navigation
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Show a screen by ID and hide all others.
+ *
+ * All elements with class `.screen` are hidden first, then the target is revealed.
+ * The screen ID is pushed onto `navigationStack` (unless it's already the top).
+ *
+ * Side effects by screen:
+ *   - `mainScreen`     → re-renders the site list and shows/hides the domain banner.
+ *   - `newWalletScreen` → generates a fresh 12-word mnemonic and renders the grid.
+ *   - `advancedScreen`  → populates the hash-length input with the current setting.
+ *
+ * @param {string} screenId - The `id` of the screen element to show.
+ */
 function showScreen(screenId) {
   document.querySelectorAll('.screen').forEach((s) => s.classList.add('hidden'));
   const target = $(screenId);
@@ -182,15 +295,30 @@ function showScreen(screenId) {
   }
 }
 
+/**
+ * Navigate to the previous screen in the navigation stack.
+ *
+ * Pops the current screen off the stack and shows whatever is now at the top.
+ * Falls back to `welcomeScreen` if the stack is empty.
+ */
 function goBack() {
   navigationStack.pop();
   const prev = navigationStack[navigationStack.length - 1] || 'welcomeScreen';
   showScreen(prev);
 }
 
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
 // Toast / Loading
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Show a brief non-blocking toast notification at the bottom of the popup.
+ *
+ * The toast uses a CSS transition to slide up into view and auto-dismisses
+ * after 2 seconds by removing the `.show` class.
+ *
+ * @param {string} message - The text to display in the toast.
+ */
 function showToast(message) {
   const toast = $('toast');
   toast.textContent = message;
@@ -198,18 +326,39 @@ function showToast(message) {
   setTimeout(() => toast.classList.remove('show'), 2000);
 }
 
+/**
+ * Show the full-screen loading modal with a custom message.
+ * Used during async operations (Nostr sync, backup, restore).
+ *
+ * @param {string} text - Status text to display below the spinner.
+ */
 function showLoading(text) {
   $('loadingText').textContent = text;
   $('loadingModal').classList.remove('hidden');
 }
 
+/**
+ * Hide the full-screen loading modal.
+ */
 function hideLoading() {
   $('loadingModal').classList.add('hidden');
 }
 
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
 // Seed Phrase UI
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Generate a new BIP39 mnemonic and render it in the seed phrase grid.
+ *
+ * Called automatically when navigating to `newWalletScreen`.
+ * Each word is rendered in a numbered tile for easy reading/transcription.
+ * Uses `escapeHtml` as a safety measure even though BIP39 words are all ASCII.
+ *
+ * Mutates: `vault.seedPhrase`
+ *
+ * @async
+ */
 async function generateNewSeed() {
   const mnemonic = await VaultCore.generateMnemonic();
   vault.seedPhrase = mnemonic;
@@ -225,6 +374,16 @@ async function generateNewSeed() {
   });
 }
 
+/**
+ * Begin the seed verification step after the user claims to have saved their phrase.
+ *
+ * Picks 3 random word positions from the mnemonic and renders input fields for them.
+ * The chosen indices are stored as a JSON string in `container.dataset.indices`
+ * (not actually read from there — `verifySeedBackup` reads `input.dataset.index`
+ * per field instead).
+ *
+ * Navigates to `verifySeedScreen` on completion.
+ */
 function confirmSeedBackup() {
   const seedWords = vault.seedPhrase.split(' ');
   const indices = [];
@@ -262,6 +421,18 @@ function confirmSeedBackup() {
   showScreen('verifySeedScreen');
 }
 
+/**
+ * Validate the 3 seed verification inputs against the stored mnemonic.
+ *
+ * Each `.verify-word` input has a `data-index` attribute pointing to the
+ * expected word position. Input is compared case-insensitively after trimming.
+ *
+ * On success: initialises the vault with the seed phrase and navigates to the
+ *             first-time encryption setup screen.
+ * On failure: highlights incorrect fields in red and shows a toast.
+ *
+ * @async
+ */
 async function verifySeedBackup() {
   const seedWords = vault.seedPhrase.split(' ');
   const inputs = document.querySelectorAll('.verify-word');
@@ -286,6 +457,16 @@ async function verifySeedBackup() {
   }
 }
 
+/**
+ * Restore a vault from a user-provided BIP39 seed phrase.
+ *
+ * Validates the phrase via `VaultCore.verifyBip39SeedPhrase` (checks word list
+ * membership AND BIP39 checksum). Invalid phrases are rejected with a toast.
+ *
+ * On success: initialises the vault and navigates to the encryption setup screen.
+ *
+ * @async
+ */
 async function restoreFromSeed() {
   const input = $('restoreSeedInput').value;
   const valid = await VaultCore.verifyBip39SeedPhrase(input);
@@ -300,9 +481,25 @@ async function restoreFromSeed() {
   showScreen('setupEncryptScreen');
 }
 
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
 // Vault Init & Lock
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Initialise the vault from a seed phrase.
+ *
+ * Steps:
+ *   1. Normalise the seed phrase (collapse whitespace, lowercase).
+ *   2. Derive the hex private key via `VaultCore.derivePrivateKey`.
+ *   3. Load any previously saved site data from chrome.storage.local and merge.
+ *   4. Sync the vault state to the background service worker (so it survives
+ *      popup close/reopen within the same service worker lifetime).
+ *
+ * Mutates: `vault.seedPhrase`, `vault.privateKey`, `vault.users`, `vault.settings`
+ *
+ * @async
+ * @param {string} seedPhrase - Raw seed phrase string (any whitespace/case).
+ */
 async function initializeVault(seedPhrase) {
   vault.seedPhrase = seedPhrase.replace(/\s+/g, ' ').trim().toLowerCase();
   vault.privateKey = await VaultCore.derivePrivateKey(vault.seedPhrase);
@@ -320,8 +517,13 @@ async function initializeVault(seedPhrase) {
 }
 
 /**
- * Sync from Nostr with visible loading indicator.
- * Called after vault is initialized and main screen is shown.
+ * Sync from Nostr relays with a visible relay-status indicator.
+ *
+ * Called after the vault is initialised and the main screen is shown.
+ * Updates the relay orb: syncing (amber) → connected (green) or offline (red).
+ * Merges fetched data into the vault and re-renders the site list on success.
+ *
+ * @async
  */
 async function syncFromNostrWithUI() {
   if (!vault.privateKey) return;
@@ -348,7 +550,12 @@ async function syncFromNostrWithUI() {
 }
 
 /**
- * Update the relay status orb indicator.
+ * Update the relay status orb indicator in the main screen header.
+ *
+ * CSS classes map to colours: relay-syncing (amber/pulse), relay-connected (green),
+ * relay-offline (red). See popup.css `.relay-orb` and `.relay-*` rules.
+ *
+ * @param {'syncing'|'connected'|'offline'} status - The new relay connection state.
  */
 function updateRelayStatus(status) {
   const orb = $('relayStatus');
@@ -359,6 +566,21 @@ function updateRelayStatus(status) {
     : 'Offline';
 }
 
+/**
+ * Lock the vault: wipe in-memory state, clear clipboard, reset to welcome screen.
+ *
+ * Steps:
+ *   1. Optionally prompt for confirmation (skipped when `skipConfirm` is true).
+ *   2. Cancel any pending clipboard-clear timer.
+ *   3. Overwrite the clipboard with an empty string to prevent leakage.
+ *   4. Reset the `vault` object to empty defaults.
+ *   5. Reset the navigation stack.
+ *   6. Tell the background service worker to clear its copy of the vault state.
+ *   7. Navigate back to the welcome screen.
+ *
+ * @async
+ * @param {boolean} [skipConfirm=false] - If true, skip the confirmation dialog.
+ */
 async function lockVault(skipConfirm = false) {
   if (!skipConfirm && vault.privateKey) {
     if (!confirm('Lock vault? Make sure you have your seed phrase saved.')) return;
@@ -380,6 +602,15 @@ async function lockVault(skipConfirm = false) {
   showToast('Vault locked');
 }
 
+/**
+ * Push the current vault state (private key, seed, users, settings) to the
+ * background service worker's in-memory cache.
+ *
+ * This ensures the vault remains "unlocked" across popup opens/closes within the
+ * same service worker lifetime, without requiring the user to re-enter their password.
+ *
+ * @async
+ */
 async function syncStateToBackground() {
   await chrome.runtime.sendMessage({
     type: 'SET_VAULT_STATE',
@@ -393,9 +624,17 @@ async function syncStateToBackground() {
 }
 
 /**
- * Re-encrypt and save the vault to chrome.storage.local.
- * This keeps the encrypted blob up-to-date when sites/settings change,
- * so the vault survives service worker restarts and extension updates.
+ * Persist non-sensitive vault data to chrome.storage.local if an encrypted
+ * blob already exists (i.e., the vault has been set up with a password).
+ *
+ * This is a "best-effort" auto-save that runs after site operations (copy,
+ * fill, delete) to keep the site list in sync with on-disk state. If no
+ * encrypted vault exists yet (first-time setup not complete), this is a no-op.
+ *
+ * Note: We cannot re-encrypt the sensitive blob without the user's password,
+ * so only the non-sensitive `users` + `settings` are written here.
+ *
+ * @async
  */
 async function autoSaveEncrypted() {
   try {
@@ -411,9 +650,20 @@ async function autoSaveEncrypted() {
   }
 }
 
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
 // Domain Banner (current tab detection)
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Show or hide the "Generate for [domain]?" banner at the bottom of the main screen.
+ *
+ * The banner appears only if:
+ *   - `currentTabDomain` is set (not a new tab, not chrome:// pages)
+ *   - The domain does NOT already exist in the vault's saved sites
+ *
+ * If the domain already has a saved entry, the user can find it in the site list
+ * (it's sorted to the top), so the banner is hidden to avoid duplication.
+ */
 function showDomainBanner() {
   const banner = $('domainBanner');
   const bannerText = $('domainBannerText');
@@ -444,15 +694,33 @@ function showDomainBanner() {
   }
 }
 
+/**
+ * Open the password generate screen pre-filled with the current tab's domain.
+ * Triggered by clicking the domain banner "Generate" button.
+ */
 function openSiteFromBanner() {
   if (currentTabDomain) {
     openSite(currentTabDomain, '', 0);
   }
 }
 
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
 // Site List
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Render the saved-sites list on the main screen.
+ *
+ * Behaviour:
+ *   - Flattens `vault.users` (nested object) into `[{ user, site, nonce }]` array.
+ *   - Sorts: current tab domain first, then alphabetically by site name.
+ *   - Filters by the current search term (matches site OR user).
+ *   - Shows `#emptyState` when there are no sites and no active search.
+ *   - Each rendered row has a click handler that opens the generate screen and
+ *     a delete button (visible on hover).
+ *
+ * Uses `textContent` for user-supplied data (site names, usernames) to prevent XSS.
+ */
 function renderSiteList() {
   const container = $('siteList');
   const emptyState = $('emptyState');
@@ -502,10 +770,10 @@ function renderSiteList() {
     info.className = 'site-info';
     const nameEl = document.createElement('div');
     nameEl.className = 'site-name';
-    nameEl.textContent = s.site;
+    nameEl.textContent = s.site;       // textContent — safe, no XSS
     const userEl = document.createElement('div');
     userEl.className = 'site-user';
-    userEl.textContent = s.user;
+    userEl.textContent = s.user;       // textContent — safe, no XSS
     info.appendChild(nameEl);
     info.appendChild(userEl);
 
@@ -526,10 +794,22 @@ function renderSiteList() {
   });
 }
 
+/**
+ * Re-render the site list whenever the search input changes.
+ * Bound to the `input` event on `#siteSearch`.
+ */
 function filterSites() {
   renderSiteList();
 }
 
+/**
+ * Allow pressing Enter in the search bar to open the generate screen with the
+ * search term pre-filled as the site name.
+ *
+ * This enables the workflow: type "github.com" → press Enter → generate screen.
+ *
+ * @param {KeyboardEvent} event - Keydown event on the search input.
+ */
 function handleSearchEnter(event) {
   if (event.key === 'Enter') {
     const term = $('siteSearch').value.trim();
@@ -539,15 +819,42 @@ function handleSearchEnter(event) {
   }
 }
 
+/**
+ * Escape a string for safe insertion as HTML text content.
+ *
+ * Uses the browser's native text node escaping by setting `div.textContent`
+ * and reading back `div.innerHTML`. This converts &, <, >, ", ' to HTML entities.
+ *
+ * Used for seed word grid rendering (innerHTML context). Site/username rendering
+ * uses `textContent` directly and does not require this function.
+ *
+ * @param  {string} str - Raw string to escape.
+ * @returns {string} HTML-escaped string safe for use inside innerHTML.
+ */
 function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
 }
 
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
 // Password Generation Screen
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Open the password generation screen, pre-filling site, username, and nonce.
+ *
+ * If both `site` and `user` are provided (existing site), the password is
+ * generated immediately. If either is empty (new site), the user must fill
+ * them in before a password is shown.
+ *
+ * Always resets: password visibility, nonce changed indicator.
+ * Always shows: the password strength indicator (based on current hashLength setting).
+ *
+ * @param {string} site  - Domain name to pre-fill (e.g., "github.com").
+ * @param {string} user  - Username or email to pre-fill.
+ * @param {number} nonce - Version number (0-based) to pre-fill.
+ */
 function openSite(site, user, nonce) {
   $('genSite').value = site;
   $('genUser').value = user;
@@ -573,6 +880,13 @@ function openSite(site, user, nonce) {
   showScreen('generateScreen');
 }
 
+/**
+ * Update the nonce-changed visual indicator on the version control.
+ *
+ * If the user has incremented or decremented the nonce away from its saved value
+ * (`originalNonce`), the nonce display turns purple to signal "unsaved change".
+ * Once the password is copied/filled (which saves the nonce), the indicator resets.
+ */
 function updateNonceIndicator() {
   const nonceControl = document.querySelector('.nonce-control');
   if (currentNonce !== originalNonce) {
@@ -582,6 +896,19 @@ function updateNonceIndicator() {
   }
 }
 
+/**
+ * Regenerate and display the current password based on site/user/nonce inputs.
+ *
+ * Called on every `input` event for the site and user fields, and after nonce
+ * changes. Only generates if all three inputs are non-empty AND the vault is
+ * unlocked (has a private key).
+ *
+ * If `passwordVisible` is false, the generated password is computed but NOT
+ * displayed (the placeholder bullets remain). This avoids exposing the password
+ * in the DOM while the user is still typing.
+ *
+ * Also updates the password strength indicator on every call.
+ */
 function updatePassword() {
   const site = $('genSite').value.trim();
   const user = $('genUser').value.trim();
@@ -606,6 +933,13 @@ function updatePassword() {
   }
 }
 
+/**
+ * Toggle the password visibility on the generate screen.
+ *
+ * When revealing: calls `updatePassword()` to put the plaintext in the DOM.
+ * When hiding: replaces with bullet characters.
+ * Updates the eye icon accordingly (👁️ / 🙈).
+ */
 function togglePasswordVisibility() {
   passwordVisible = !passwordVisible;
   $('visibilityIcon').textContent = passwordVisible ? '🙈' : '👁️';
@@ -617,6 +951,13 @@ function togglePasswordVisibility() {
   }
 }
 
+/**
+ * Increment the nonce (version) counter by 1.
+ *
+ * Used when the user needs to generate a new password for the same site/user
+ * (e.g., after a forced password reset on the target site).
+ * Updates the display and regenerates the password if visible.
+ */
 function incrementNonce() {
   currentNonce++;
   $('nonceDisplay').textContent = currentNonce + 1;
@@ -624,6 +965,11 @@ function incrementNonce() {
   if (passwordVisible) updatePassword();
 }
 
+/**
+ * Decrement the nonce (version) counter by 1, minimum 0.
+ *
+ * Prevents going below 0. Updates the display and regenerates if visible.
+ */
 function decrementNonce() {
   if (currentNonce > 0) {
     currentNonce--;
@@ -633,6 +979,21 @@ function decrementNonce() {
   }
 }
 
+/**
+ * Generate the password, save the site entry, copy to clipboard, and schedule
+ * a 30-second auto-clear.
+ *
+ * Steps:
+ *   1. Validate site and user inputs.
+ *   2. Save `{ site: nonce }` under the user key in `vault.users`.
+ *   3. Generate the password deterministically.
+ *   4. Copy to clipboard via `navigator.clipboard.writeText`.
+ *   5. Schedule a 30 000 ms timer to overwrite the clipboard with an empty string.
+ *   6. Persist updated vault to chrome.storage.local and background service worker.
+ *   7. Trigger a silent Nostr backup (fire-and-forget).
+ *
+ * @async
+ */
 async function copyPassword() {
   const site = $('genSite').value.trim();
   const user = $('genUser').value.trim();
@@ -675,6 +1036,18 @@ async function copyPassword() {
   VaultStorage.backupToNostr(vault).catch(e => console.error('Silent backup failed:', e));
 }
 
+/**
+ * Generate the password, save the site entry, and autofill it into the active tab.
+ *
+ * Sends a `FILL_PASSWORD` message to the content script running in the active tab
+ * via `chrome.tabs.sendMessage`. The content script finds the password field(s) and
+ * fills them using native event dispatching (see content.js).
+ *
+ * Falls back to "try copying instead" toast if the content script is not injected
+ * (e.g., on chrome:// pages or pages where the content script was blocked).
+ *
+ * @async
+ */
 async function fillPassword() {
   const site = $('genSite').value.trim();
   const user = $('genUser').value.trim();
@@ -720,9 +1093,29 @@ async function fillPassword() {
   await syncStateToBackground();
 }
 
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
 // Encryption
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Unlock the vault using the user's encryption password.
+ *
+ * Authentication mechanism:
+ *   - The encrypted vault is keyed by `SHA256(password)` in chrome.storage.local.
+ *   - The function hashes the entered password, looks up the key, and attempts AES decryption.
+ *   - A wrong password results in no matching key or a failed JSON parse.
+ *
+ * Rate limiting:
+ *   - After `MAX_UNLOCK_ATTEMPTS` (5) failures, locks for `UNLOCK_LOCKOUT_MS` (30s).
+ *   - Counter and lockout timestamp are module-level (reset on popup close).
+ *
+ * On success:
+ *   - Merges decrypted data into `vault`.
+ *   - Navigates to main screen.
+ *   - Triggers a background Nostr sync.
+ *
+ * @async
+ */
 async function unlockVault() {
   // Rate limiting
   const now = Date.now();
@@ -739,6 +1132,7 @@ async function unlockVault() {
   }
 
   try {
+    // The vault blob is keyed by SHA256(password), not the password itself
     const key = VaultCore.hash(password);
     const stored = await VaultStorage.getEncrypted();
     const encrypted = stored[key];
@@ -789,7 +1183,17 @@ async function unlockVault() {
 }
 
 /**
- * First-time setup: save encrypted vault and proceed to main screen.
+ * First-time encryption setup: encrypt the vault with a chosen password and
+ * save it to chrome.storage.local, then proceed to the main screen.
+ *
+ * This is the mandatory step after creating a new vault or restoring from seed.
+ * It ensures the vault survives service worker restarts and browser updates.
+ *
+ * Encryption: CryptoJS AES with the plaintext password as the key material.
+ * Storage key: SHA256(password) — allows verifying the password without
+ *              attempting to decrypt an incorrect blob.
+ *
+ * @async
  */
 async function setupEncryptAndContinue() {
   const pass1 = $('setupEncryptPass1').value;
@@ -827,6 +1231,19 @@ async function setupEncryptAndContinue() {
   syncFromNostrWithUI();
 }
 
+/**
+ * Re-encrypt and save the vault with a new password from the settings screen.
+ *
+ * Identical to `setupEncryptAndContinue` but uses the settings screen's password
+ * inputs and navigates back to settings on success.
+ *
+ * Multiple passwords can co-exist in the encrypted blob (each hashed key maps to
+ * its own AES-encrypted copy of the vault data). Calling this with a new password
+ * adds a new entry rather than replacing the old one — clearing old entries requires
+ * a vault wipe and re-setup.
+ *
+ * @async
+ */
 async function saveEncrypted() {
   const pass1 = $('encryptPass1').value;
   const pass2 = $('encryptPass2').value;
@@ -856,9 +1273,20 @@ async function saveEncrypted() {
   showScreen('settingsScreen');
 }
 
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
 // Settings
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Navigate to the view-seed screen, rendering the current seed phrase as a grid.
+ *
+ * Only available when `vault.seedPhrase` is set. Shows a toast and returns
+ * early if the seed phrase is not available (e.g., vault restored from an old
+ * encrypted blob that didn't include the seed phrase).
+ *
+ * Uses `escapeHtml` for each word before rendering to prevent XSS (even though
+ * BIP39 words are safe ASCII, it's a good defensive habit).
+ */
 function showSeedPhrase() {
   if (!vault.seedPhrase) {
     showToast('Seed phrase not available');
@@ -878,6 +1306,15 @@ function showSeedPhrase() {
   showScreen('viewSeedScreen');
 }
 
+/**
+ * Copy the current seed phrase to the clipboard.
+ *
+ * NOTE: Unlike `copyPassword`, there is no auto-clear timer here. The seed phrase
+ * is the master secret and clipboard persistence could be a security concern.
+ * Consider adding a short clear timer in a future security pass.
+ *
+ * @async
+ */
 async function copySeedPhrase() {
   try {
     await navigator.clipboard.writeText(vault.seedPhrase);
@@ -887,6 +1324,16 @@ async function copySeedPhrase() {
   }
 }
 
+/**
+ * Save the hash length setting from the advanced settings screen.
+ *
+ * The hash length controls how many hex characters from the SHA-256 output
+ * are included in the generated password. Clamped to the range [8, 64].
+ * Changing this setting affects all future-generated passwords — existing
+ * passwords are unaffected until the user explicitly re-copies them.
+ *
+ * @async
+ */
 async function saveAdvancedSettings() {
   const len = parseInt($('hashLengthSetting').value) || 16;
   vault.settings.hashLength = Math.max(8, Math.min(64, len));
@@ -896,6 +1343,16 @@ async function saveAdvancedSettings() {
   showScreen('settingsScreen');
 }
 
+/**
+ * Export the vault's site list and settings as a JSON file download.
+ *
+ * The export does NOT include the private key or seed phrase — only the
+ * non-sensitive `users` and `settings` objects. This file can be re-imported
+ * into any Vault instance (browser extension or web app) that shares the same
+ * seed phrase.
+ *
+ * Uses a Blob + temporary anchor element for the download (MV3-compatible).
+ */
 function downloadData() {
   const data = { users: vault.users, settings: vault.settings };
   const blob = new Blob([JSON.stringify(data, null, 2)], {
@@ -912,9 +1369,22 @@ function downloadData() {
   showToast('Downloaded!');
 }
 
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
 // Site Management
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Delete a saved site entry from the vault and persist the change.
+ *
+ * If deleting the site leaves the user with no remaining sites, the user entry
+ * is also removed from `vault.users` to keep the structure clean.
+ *
+ * Triggers a silent Nostr backup after deletion to keep remotes in sync.
+ *
+ * @async
+ * @param {string} site - Domain name to delete (e.g., "github.com").
+ * @param {string} user - Username associated with the site entry.
+ */
 async function deleteSite(site, user) {
   if (!confirm(`Delete ${site} (${user})?`)) return;
 
@@ -932,9 +1402,24 @@ async function deleteSite(site, user) {
   VaultStorage.backupToNostr(vault).catch(e => console.error('Silent backup failed:', e));
 }
 
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
 // Import
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Trigger a file picker for JSON vault import and merge the data into the vault.
+ *
+ * Import merge strategy:
+ *   - New users and sites are added.
+ *   - For existing site/user combinations, the higher nonce wins
+ *     (preserves the most recent "password reset" version).
+ *   - Settings from the import file are merged (imported values take precedence).
+ *
+ * The private key and seed phrase in the import file are IGNORED — only
+ * `users` and `settings` are imported.
+ *
+ * Shows a summary toast and triggers a silent Nostr backup on success.
+ */
 function triggerImport() {
   const input = document.createElement('input');
   input.type = 'file';
@@ -954,6 +1439,7 @@ function triggerImport() {
       Object.entries(data.users).forEach(([user, sites]) => {
         if (!vault.users[user]) vault.users[user] = {};
         Object.entries(sites).forEach(([site, nonce]) => {
+          // Keep the higher nonce (most recent password version wins)
           if (vault.users[user][site] === undefined || nonce > vault.users[user][site]) {
             vault.users[user][site] = nonce;
           }
@@ -973,9 +1459,20 @@ function triggerImport() {
   input.click();
 }
 
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
 // Nostr Backup — NIP-44 + kind:30078
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Manually back up the vault to Nostr relays (initiated from Settings).
+ *
+ * Shows a loading modal during the operation and a toast with the result.
+ * Delegates actual relay work to `VaultStorage.backupToNostr`.
+ *
+ * @async
+ * @param {boolean} [silent=false] - If true, skip the loading modal and toast
+ *   (used for automatic background backups triggered by copy/fill/delete).
+ */
 async function backupToNostr(silent = false) {
   if (!vault.privateKey) {
     if (!silent) showToast('Vault not initialized');
@@ -996,6 +1493,14 @@ async function backupToNostr(silent = false) {
   }
 }
 
+/**
+ * Manually restore vault data from Nostr relays (initiated from Settings).
+ *
+ * Shows a loading modal, fetches from all configured relays, and merges the
+ * latest event's data into the current vault.
+ *
+ * @async
+ */
 async function restoreFromNostr() {
   if (!vault.privateKey) {
     showToast('Vault not initialized');
@@ -1025,9 +1530,25 @@ async function restoreFromNostr() {
   }
 }
 
-// ============================================
-// Seed Autocomplete
-// ============================================
+// ─────────────────────────────────────────────────────────────────────────────
+// Seed Autocomplete (BIP39 word suggestions)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Handle input events on the restore seed textarea to show BIP39 word suggestions.
+ *
+ * Algorithm:
+ *   1. Extract the partial word immediately before the cursor (regex: `[a-z]+$`).
+ *   2. Filter the BIP39 `words` array to those starting with the partial word.
+ *   3. Show up to 6 suggestions in the dropdown.
+ *   4. Update the word count display.
+ *
+ * The dropdown is hidden if:
+ *   - The partial word is empty.
+ *   - The only suggestion is an exact match (the word is already complete).
+ *
+ * @param {InputEvent} event - Input event from the seed phrase textarea.
+ */
 function onSeedInput(event) {
   const textarea = event.target;
   const value = textarea.value;
@@ -1067,6 +1588,16 @@ function onSeedInput(event) {
   suggestions.classList.remove('hidden');
 }
 
+/**
+ * Render the BIP39 autocomplete suggestion list.
+ *
+ * Each suggestion has the matched prefix highlighted in purple (`.seed-suggestion-match`).
+ * The active suggestion (keyboard-selected) gets the `.active` class.
+ *
+ * Clicking a suggestion calls `selectSuggestion(word)`.
+ *
+ * @param {string} typed - The currently typed partial word (used for prefix highlighting).
+ */
 function renderSuggestions(typed) {
   const suggestions = $('seedSuggestions');
   suggestions.innerHTML = '';
@@ -1075,6 +1606,7 @@ function renderSuggestions(typed) {
     const div = document.createElement('div');
     div.className = 'seed-suggestion' + (i === activeSuggestionIndex ? ' active' : '');
 
+    // Highlight the typed prefix in purple
     const matchSpan = document.createElement('span');
     matchSpan.className = 'seed-suggestion-match';
     matchSpan.textContent = word.slice(0, typed.length);
@@ -1087,6 +1619,20 @@ function renderSuggestions(typed) {
   });
 }
 
+/**
+ * Handle keyboard navigation within the BIP39 autocomplete dropdown.
+ *
+ * Keys handled (only when the suggestion dropdown is visible):
+ *   - ArrowDown  → highlight the next suggestion (wraps around)
+ *   - ArrowUp    → highlight the previous suggestion (wraps around)
+ *   - Tab/Enter  → select the currently highlighted suggestion
+ *   - Escape     → hide the dropdown without selecting
+ *
+ * All handled keys call `preventDefault()` to suppress default browser behaviour
+ * (tab focus change, form submission, etc.).
+ *
+ * @param {KeyboardEvent} event - Keydown event on the seed phrase textarea.
+ */
 function onSeedKeydown(event) {
   const suggestions = $('seedSuggestions');
 
@@ -1119,6 +1665,14 @@ function onSeedKeydown(event) {
   }
 }
 
+/**
+ * Get the word currently being typed in the seed phrase textarea (at cursor position).
+ *
+ * Reads the textarea value and cursor position to extract the partial word
+ * immediately to the left of the cursor (same logic as `onSeedInput`).
+ *
+ * @returns {string} The lowercase partial word, or an empty string.
+ */
 function getCurrentTypedWord() {
   const textarea = $('restoreSeedInput');
   const cursorPos = textarea.selectionStart;
@@ -1127,6 +1681,17 @@ function getCurrentTypedWord() {
   return wordMatch ? wordMatch[0].toLowerCase() : '';
 }
 
+/**
+ * Insert the selected suggestion word into the textarea at the cursor position.
+ *
+ * Replaces the currently-typed partial word with the complete suggestion and
+ * appends a space, then moves the cursor to after the space so the user can
+ * immediately start typing the next word.
+ *
+ * Updates the word count display after insertion.
+ *
+ * @param {string} word - The complete BIP39 word to insert.
+ */
 function selectSuggestion(word) {
   const textarea = $('restoreSeedInput');
   const cursorPos = textarea.selectionStart;
@@ -1136,10 +1701,12 @@ function selectSuggestion(word) {
   const wordMatch = beforeCursor.match(/[a-z]+$/i);
   const wordStart = wordMatch ? cursorPos - wordMatch[0].length : cursorPos;
 
+  // Replace partial word with complete word + space
   const newValue =
     value.slice(0, wordStart) + word + ' ' + value.slice(cursorPos);
   textarea.value = newValue;
 
+  // Move cursor to after the inserted word + space
   const newCursorPos = wordStart + word.length + 1;
   textarea.setSelectionRange(newCursorPos, newCursorPos);
   textarea.focus();

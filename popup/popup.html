@@ -5,9 +5,29 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Vault</title>
   <link rel="stylesheet" href="popup.css">
+  <!--
+    Content Security Policy is enforced by manifest.json.
+    All scripts are loaded as external files (MV3 forbids inline scripts).
+    Load order matters:
+      1. crypto-js  → provides CryptoJS global (AES + SHA256)
+      2. bip39WordList → provides `words` global (2048-word array)
+      3. nostr-tools  → provides NostrTools global
+      4. vault-core   → depends on CryptoJS + words + NostrTools
+      5. vault-storage → depends on VaultCore + NostrTools
+      6. popup.js     → depends on all of the above
+  -->
 </head>
 <body>
-  <!-- Welcome Screen -->
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       WELCOME SCREEN
+       Entry point shown on first run or after locking.
+       Provides three entry flows:
+         - Create New Vault   → newWalletScreen
+         - Restore from Seed  → restoreScreen
+         - Unlock Saved Vault → unlockScreen (button is styled prominently if
+                                 an encrypted vault exists in chrome.storage)
+       ═══════════════════════════════════════════════════════════════════════ -->
   <div id="welcomeScreen" class="screen">
     <div class="logo">🔐</div>
     <h1>Vault</h1>
@@ -19,29 +39,49 @@
     </div>
   </div>
 
-  <!-- New Wallet Screen -->
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       NEW WALLET SCREEN
+       Generates and displays a new 12-word BIP39 seed phrase.
+       The seed grid (#seedGrid) is populated by popup.js → generateNewSeed().
+       "I've saved them" → confirmSeedBackup() → verifySeedScreen
+       ═══════════════════════════════════════════════════════════════════════ -->
   <div id="newWalletScreen" class="screen hidden">
     <div class="header">
       <button class="back-btn" id="backFromNew">←</button>
       <h2>New Vault</h2>
     </div>
     <p class="info">Write down these 12 words. They are your master key.</p>
+    <!-- Populated dynamically by generateNewSeed() as numbered word tiles -->
     <div id="seedGrid" class="seed-grid"></div>
     <button class="btn btn-primary" id="btnConfirmSeed">I've saved them</button>
   </div>
 
-  <!-- Verify Seed Screen -->
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       VERIFY SEED SCREEN
+       Asks the user to re-enter 3 randomly chosen words from their seed phrase
+       to confirm they have written it down correctly.
+       #verifyInputs is populated by confirmSeedBackup() with labelled inputs.
+       ═══════════════════════════════════════════════════════════════════════ -->
   <div id="verifySeedScreen" class="screen hidden">
     <div class="header">
       <button class="back-btn" id="backFromVerify">←</button>
       <h2>Verify Backup</h2>
     </div>
     <p class="info">Confirm a few words to make sure you saved them.</p>
+    <!-- Populated dynamically with 3 word-verification input groups -->
     <div id="verifyInputs"></div>
     <button class="btn btn-primary" id="btnVerifySeed">Verify</button>
   </div>
 
-  <!-- Restore Screen -->
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       RESTORE SCREEN
+       Allows entering an existing BIP39 seed phrase to restore a vault.
+       Features:
+         - Live BIP39 word autocomplete (#seedSuggestions dropdown)
+         - Live word count (#wordCount) for pacing input
+         - onSeedInput / onSeedKeydown handlers for autocomplete navigation
+         - restoreFromSeed() validates and initialises vault on submit
+       ═══════════════════════════════════════════════════════════════════════ -->
   <div id="restoreScreen" class="screen hidden">
     <div class="header">
       <button class="back-btn" id="backFromRestore">←</button>
@@ -50,13 +90,21 @@
     <div class="input-group">
       <label>Seed Phrase</label>
       <textarea id="restoreSeedInput" rows="3" placeholder="Enter your 12 or 24 word seed phrase"></textarea>
+      <!-- BIP39 autocomplete dropdown — hidden by default, shown on partial word match -->
       <div id="seedSuggestions" class="suggestions hidden"></div>
+      <!-- Live counter: updates on every keystroke to help the user track progress -->
       <div class="word-count">Words: <span id="wordCount">0</span></div>
     </div>
     <button class="btn btn-primary" id="btnRestoreSeed">Restore</button>
   </div>
 
-  <!-- Unlock Screen -->
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       UNLOCK SCREEN
+       Unlocks a previously encrypted vault stored in chrome.storage.local.
+       Authentication: SHA256(password) is used as a lookup key in the
+       encrypted vault map; the matching AES blob is then decrypted.
+       Rate-limited: 5 attempts → 30s lockout (see popup.js unlockVault()).
+       ═══════════════════════════════════════════════════════════════════════ -->
   <div id="unlockScreen" class="screen hidden">
     <div class="header">
       <button class="back-btn" id="backFromUnlockScreen">←</button>
@@ -64,12 +112,19 @@
     </div>
     <div class="input-group">
       <label>Encryption Password</label>
+      <!-- Enter key bound to unlockVault() in popup.js -->
       <input type="password" id="unlockPassword" placeholder="Enter password">
     </div>
     <button class="btn btn-primary" id="btnUnlockVault">Unlock</button>
   </div>
 
-  <!-- Setup Encrypt Screen (first-time, mandatory) -->
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       SETUP ENCRYPT SCREEN (first-time, mandatory)
+       Shown after new vault creation or seed restore.
+       Forces the user to set an encryption password before accessing the vault.
+       This ensures the vault survives service worker restarts and browser updates.
+       Min password length: 4 characters (enforced in setupEncryptAndContinue()).
+       ═══════════════════════════════════════════════════════════════════════ -->
   <div id="setupEncryptScreen" class="screen hidden">
     <div class="header">
       <h2>🔐 Set Password</h2>
@@ -81,35 +136,77 @@
     </div>
     <div class="input-group">
       <label>Confirm Password</label>
+      <!-- Enter key bound to setupEncryptAndContinue() in popup.js -->
       <input type="password" id="setupEncryptPass2" placeholder="Repeat password">
     </div>
     <button class="btn btn-primary" id="btnSetupEncrypt">Save & Continue</button>
   </div>
 
-  <!-- Main Screen (site list) -->
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       MAIN SCREEN (site list)
+       The primary screen shown after unlocking.
+       Components:
+         - Header: title + relay status orb + settings + lock buttons
+         - Search bar: filters site list + Enter to add new site
+         - Site list (#siteList): rendered by renderSiteList()
+         - Empty state: shown when no sites are saved
+         - Domain banner: shown when active tab domain is not in vault
+       ═══════════════════════════════════════════════════════════════════════ -->
   <div id="mainScreen" class="screen hidden">
     <div class="header">
       <h2>Vault</h2>
       <div class="header-actions">
+        <!--
+          Relay status orb — indicates Nostr relay connection state:
+          relay-syncing  (amber, pulsing) → fetching from relays
+          relay-connected (green)         → sync successful
+          relay-offline  (red)            → all relays unreachable
+          Class set dynamically by updateRelayStatus() in popup.js
+        -->
         <span id="relayStatus" class="relay-orb" title="Relay status"></span>
         <button class="icon-btn" id="btnSettings" title="Settings">⚙️</button>
         <button class="icon-btn" id="btnLock" title="Lock">🔒</button>
       </div>
     </div>
+
+    <!-- Search / Add new site — Enter key opens generate screen with typed domain -->
     <div class="search-bar">
       <input type="text" id="siteSearch" placeholder="Search or add site...">
     </div>
+
+    <!-- Site list — populated by renderSiteList() -->
     <div id="siteList" class="site-list"></div>
+
+    <!-- Empty state — shown when vault has no saved sites -->
     <div id="emptyState" class="empty-state hidden">
       <p>No sites yet.<br>Search a domain and press Enter to add one.</p>
     </div>
+
+    <!--
+      Domain banner — appears when the active tab's domain is not yet in the vault.
+      Text: "Generate for [domain]?" — clicking opens the generate screen.
+      Shown/hidden by showDomainBanner() in popup.js.
+    -->
     <div id="domainBanner" class="domain-banner hidden">
       <span id="domainBannerText"></span>
       <button class="btn btn-sm btn-primary" id="btnDomainBanner">Generate</button>
     </div>
   </div>
 
-  <!-- Generate Screen -->
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       GENERATE SCREEN
+       Password generation and autofill for a specific site/user combination.
+       Components:
+         - Site input (#genSite)      → hashed into the password
+         - Username input (#genUser)  → hashed into the password
+         - Password display (#genPassword) → shows bullets or plaintext
+         - Visibility toggle (#btnToggleVis)
+         - Strength indicator (#passwordStrength)
+         - Version/nonce control: Dec / display / Inc
+         - Copy to clipboard (saves site + schedules clipboard clear)
+         - Fill on Page (sends FILL_PASSWORD to content script)
+       Password formula: "PASS" + SHA256(pk/user/site/nonce)[0:hashLen] + "249+"
+       ═══════════════════════════════════════════════════════════════════════ -->
   <div id="generateScreen" class="screen hidden">
     <div class="header">
       <button class="back-btn" id="backFromGenerate">←</button>
@@ -123,11 +220,22 @@
       <label>Username / Email</label>
       <input type="text" id="genUser" placeholder="e.g. you@email.com">
     </div>
+
+    <!-- Password display — textContent set to bullets or plaintext by updatePassword() -->
     <div class="password-display">
       <span id="genPassword">••••••••••••</span>
       <button class="icon-btn" id="btnToggleVis"><span id="visibilityIcon">👁️</span></button>
     </div>
+
+    <!-- Strength indicator — populated by VaultCore.getPasswordStrength() -->
     <div id="passwordStrength" class="password-strength"></div>
+
+    <!--
+      Nonce (version) control.
+      Nonce 0 = "Version 1" (displayed as nonce+1 in the UI).
+      Increment to generate a new password for the same site/user after a reset.
+      Display turns purple if current nonce ≠ saved nonce (nonce-changed class).
+    -->
     <div class="nonce-control">
       <label>Version</label>
       <div class="nonce-buttons">
@@ -136,43 +244,58 @@
         <button class="btn btn-sm" id="btnNonceInc">+</button>
       </div>
     </div>
+
     <div class="actions">
+      <!-- Copies to clipboard + saves site + schedules 30s clipboard clear -->
       <button class="btn btn-primary" id="btnCopyPassword">Copy Password</button>
+      <!-- Sends FILL_PASSWORD to content.js in the active tab -->
       <button class="btn btn-secondary" id="btnFillPassword">Fill on Page</button>
     </div>
   </div>
 
-  <!-- Settings Screen -->
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       SETTINGS SCREEN
+       Navigation hub for all advanced vault operations.
+       Each item is a tappable row that navigates to a sub-screen or triggers
+       an action inline (Nostr backup/restore, export, import).
+       ═══════════════════════════════════════════════════════════════════════ -->
   <div id="settingsScreen" class="screen hidden">
     <div class="header">
       <button class="back-btn" id="backFromSettings">←</button>
       <h2>Settings</h2>
     </div>
     <div class="settings-list">
+      <!-- Navigates to encryptScreen: re-encrypt vault with a new password -->
       <div class="setting-item" id="settEncrypt">
         <span>💾 Save Encrypted</span>
         <span class="chevron">›</span>
       </div>
+      <!-- Navigates to viewSeedScreen: shows the seed phrase grid + copy button -->
       <div class="setting-item" id="settViewSeed">
         <span>🔑 View Seed Phrase</span>
         <span class="chevron">›</span>
       </div>
+      <!-- Navigates to advancedScreen: configure hash length -->
       <div class="setting-item" id="settAdvanced">
         <span>🔧 Advanced</span>
         <span class="chevron">›</span>
       </div>
+      <!-- Inline action: backs up users+settings to Nostr relays (NIP-44 kind:30078) -->
       <div class="setting-item" id="settNostrBackup">
         <span>☁️ Backup to Nostr</span>
         <span class="chevron">›</span>
       </div>
+      <!-- Inline action: restores users+settings from Nostr relays -->
       <div class="setting-item" id="settNostrRestore">
         <span>📥 Restore from Nostr</span>
         <span class="chevron">›</span>
       </div>
+      <!-- Inline action: downloads vault-export.json (users + settings only) -->
       <div class="setting-item" id="settExport">
         <span>📦 Export JSON</span>
         <span class="chevron">›</span>
       </div>
+      <!-- Inline action: opens file picker to import a vault-export.json -->
       <div class="setting-item" id="settImport">
         <span>📥 Import JSON</span>
         <span class="chevron">›</span>
@@ -180,7 +303,12 @@
     </div>
   </div>
 
-  <!-- Encrypt Screen -->
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       ENCRYPT SCREEN (re-encrypt from settings)
+       Allows setting or changing the encryption password post-setup.
+       Each new password creates an additional entry in the encrypted blob map.
+       (Old passwords are NOT removed — this is a known limitation.)
+       ═══════════════════════════════════════════════════════════════════════ -->
   <div id="encryptScreen" class="screen hidden">
     <div class="header">
       <button class="back-btn" id="backFromEncrypt">←</button>
@@ -192,22 +320,35 @@
     </div>
     <div class="input-group">
       <label>Confirm Password</label>
+      <!-- Enter key bound to saveEncrypted() in popup.js -->
       <input type="password" id="encryptPass2" placeholder="Repeat password">
     </div>
     <button class="btn btn-primary" id="btnSaveEncrypted">Save</button>
   </div>
 
-  <!-- View Seed Screen -->
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       VIEW SEED SCREEN
+       Displays the current session's seed phrase in a numbered grid.
+       Warning: This exposes the master secret — should only be accessed in
+       a private environment. No explicit warning is shown (future improvement).
+       ═══════════════════════════════════════════════════════════════════════ -->
   <div id="viewSeedScreen" class="screen hidden">
     <div class="header">
       <button class="back-btn" id="backFromViewSeed">←</button>
       <h2>Seed Phrase</h2>
     </div>
+    <!-- Populated by showSeedPhrase() in popup.js -->
     <div id="viewSeedGrid" class="seed-grid"></div>
     <button class="btn btn-secondary" id="btnCopySeed">Copy</button>
   </div>
 
-  <!-- Advanced Screen -->
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       ADVANCED SCREEN
+       Currently exposes one setting: hash length (number of hex chars from
+       SHA-256 used in the password entropy portion).
+       Range: 8–64 (clamped in saveAdvancedSettings()).
+       Default: 16 (64-bit entropy → "Strong").
+       ═══════════════════════════════════════════════════════════════════════ -->
   <div id="advancedScreen" class="screen hidden">
     <div class="header">
       <button class="back-btn" id="backFromAdvanced">←</button>
@@ -220,10 +361,18 @@
     <button class="btn btn-primary" id="btnSaveAdvanced">Save</button>
   </div>
 
-  <!-- Toast -->
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       GLOBAL UI COMPONENTS
+       ═══════════════════════════════════════════════════════════════════════ -->
+
+  <!-- Toast notification — slides up from the bottom, auto-dismisses after 2s -->
   <div id="toast" class="toast"></div>
 
-  <!-- Loading Modal -->
+  <!--
+    Loading modal — full-screen overlay with spinner.
+    Shown during async operations (Nostr backup, restore, sync).
+    #loadingText is updated before showing: showLoading('Backing up to Nostr...')
+  -->
   <div id="loadingModal" class="loading-modal hidden">
     <div class="loading-content">
       <div class="spinner"></div>
@@ -231,7 +380,9 @@
     </div>
   </div>
 
-  <!-- Scripts -->
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       SCRIPTS — load order is significant (see head comment)
+       ═══════════════════════════════════════════════════════════════════════ -->
   <script src="../lib/crypto-js.min.js"></script>
   <script src="../lib/bip39WordList.js"></script>
   <script src="../lib/nostr-tools.min.js"></script>
