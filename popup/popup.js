@@ -542,6 +542,15 @@ async function syncFromNostrWithUI() {
       if (data.isLegacy && !vault.settings.hasBackupPassword) {
         showBackupPasswordNudge();
       }
+      // If vault has backup password but session cache is empty, prompt early
+      // so silent backups don't pile up as pending
+      if (vault.settings.hasBackupPassword && !VaultStorage.getSessionBackupPassword()) {
+        const pwd = await showBackupPasswordPrompt('enter');
+        if (pwd) {
+          VaultStorage.setSessionBackupPassword(pwd);
+          await syncStateToBackground();
+        }
+      }
     } else {
       updateRelayStatus('connected');
     }
@@ -1582,18 +1591,20 @@ function showBackupPasswordNudge() {
   btn.style.cssText = 'background:none;border:none;color:var(--accent,#7c5cff);cursor:pointer;text-decoration:underline;font-size:inherit;padding:0;margin-left:4px;';
   btn.addEventListener('click', async () => {
     toast.classList.remove('show');
-    const pwd = await showBackupPasswordPrompt('set');
+    const mode = vault.settings.hasBackupPassword ? 'enter' : 'set';
+    const pwd = await showBackupPasswordPrompt(mode);
     if (pwd) {
       VaultStorage.setSessionBackupPassword(pwd);
       vault.settings.hasBackupPassword = true;
+      _pendingBackupAfterPassword = false;
       await syncStateToBackground();
-      showLoading('Upgrading backup...');
+      showLoading('Syncing backup...');
       const result = await VaultStorage.backupToNostr(vault, false, pwd);
       hideLoading();
       if (result.success > 0) {
-        showToast(`Backup upgraded to ${result.success} relay(s)`);
+        showToast(`Backed up to ${result.success} relay(s)`);
       } else {
-        showToast('Backup upgrade failed');
+        showToast('Backup failed');
       }
     }
   });
@@ -1636,26 +1647,49 @@ function backupToNostrDebounced() {
  * @param {boolean} [silent=false] - If true, skip the loading modal and toast
  *   (used for automatic background backups triggered by copy/fill/delete).
  */
+let _pendingBackupAfterPassword = false;
+
 async function backupToNostr(silent = false) {
   if (!vault.privateKey) {
     if (!silent) showToast('Vault not initialized');
     return;
   }
 
-  // If interactive and no backup password set, prompt user to create one
-  if (!silent && !VaultStorage.getSessionBackupPassword() && !vault.settings.hasBackupPassword) {
-    const pwd = await showBackupPasswordPrompt('set');
-    if (pwd) {
-      VaultStorage.setSessionBackupPassword(pwd);
-      vault.settings.hasBackupPassword = true;
-      await syncStateToBackground();
+  // Ensure backup password is available — NEVER fall back to single-layer
+  if (!VaultStorage.getSessionBackupPassword()) {
+    if (silent) {
+      // Queue backup for when password becomes available
+      _pendingBackupAfterPassword = true;
+      const msg = vault.settings.hasBackupPassword
+        ? 'Backup pending — re-enter backup password'
+        : 'Backup pending — set password to sync';
+      showToast(msg);
+      return;
+    } else {
+      // Interactive — prompt for password
+      const mode = vault.settings.hasBackupPassword ? 'enter' : 'set';
+      const pwd = await showBackupPasswordPrompt(mode);
+      if (pwd) {
+        VaultStorage.setSessionBackupPassword(pwd);
+        vault.settings.hasBackupPassword = true;
+        await syncStateToBackground();
+      } else {
+        showToast('Backup cancelled');
+        return;
+      }
     }
-    // If user cancels, proceed with single-layer backup
   }
 
   if (!silent) showLoading('Backing up to Nostr...');
 
   const result = await VaultStorage.backupToNostr(vault, silent);
+
+  if (result.deferred) {
+    // Should not happen since we checked above, but handle defensively
+    _pendingBackupAfterPassword = true;
+    if (!silent) { hideLoading(); showToast('Backup pending — set backup password'); }
+    return;
+  }
 
   if (!silent) {
     hideLoading();
