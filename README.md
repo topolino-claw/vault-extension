@@ -1,71 +1,90 @@
-# Vault — Chrome Extension
+# Vault Extension — Chrome Password Manager
 
-Deterministic password manager as a Chrome extension. Same math as [Vault Web](https://github.com/fabricio333/PasswordManagerWeb), now with autofill.
+Same deterministic algorithm as [Vault Web](https://github.com/topolino-claw/PasswordManagerWeb), built into your browser with autofill.
+
+**Install:** download ZIP from [releases](https://github.com/topolino-claw/vault-extension/releases) → Chrome → `chrome://extensions/` → Developer mode → Load unpacked
+
+---
+
+## How It Works
+
+```
+password = "PASS" + SHA256(privateKey + "/" + username + "/" + domain + "/" + nonce).slice(0,16) + "249+"
+```
+
+Same seed phrase → same passwords as the web app. Always.
+
+---
+
+## Setup
+
+1. Install the extension (see above)
+2. Click the Vault icon in toolbar
+3. Create new vault or restore with existing seed phrase
+4. Set a backup password when prompted (protects Nostr cloud sync)
+5. Visit any site → Vault detects the domain → click Fill or Copy
+
+---
+
+## Master Keys
+
+| Key | Where it lives |
+|---|---|
+| **Seed phrase** | Paper, 2 copies, separate locations. Never digital. |
+| **Vault password** | Unlocks the local encrypted vault each session |
+| **Backup password** | Protects Nostr backup — never stored, only in your head |
+
+---
 
 ## Features
 
-- **Deterministic passwords** — same inputs = same password, always
-- **BIP39 seed phrase** — write it down, recover anywhere
-- **Autofill** — detects password fields and fills with one click
-- **Current site detection** — shows the active tab's domain automatically
-- **Domain matching** — sites you've saved bubble to the top when you visit them
-- **Context menu** — right-click → "Generate password with Vault"
-- **No server, no sync** — everything runs locally in the extension
+- **Autofill:** detects password fields, fills with one click (React/Vue compatible)
+- **Domain detection:** current tab's domain auto-filled, saved sites bubble to top
+- **Nostr backup:** double-encrypted sync (same as web app)
+- **Context menu:** right-click → "Generate password with Vault"
 
-## Install (Developer Mode)
+---
 
-1. Clone this repo
-2. Open `chrome://extensions/`
-3. Enable **Developer mode** (top right)
-4. Click **Load unpacked**
-5. Select the `vault-extension` folder
-6. Click the puzzle piece icon → pin Vault
+## Nostr Backup
 
-## Usage
+Same double-encryption as web app:
+1. `PBKDF2(backupPassword, npub, 600k)` → `AES-256-GCM` (Layer 1)
+2. `NIP-44` with Nostr key derived from seed (Layer 2)
 
-1. Click the Vault icon in the toolbar
-2. Create a new vault or restore an existing seed phrase
-3. Visit a site → Vault detects the domain and offers to generate
-4. Click **Copy Password** or **Fill on Page**
+Auto-syncs after every change. No single-layer fallback — if backup password not set, sync is deferred until you provide it.
 
-## Password Generation
-
-Same algorithm as the web version:
-
-```
-password = "PASS" + SHA256(privateKey + "/" + username + "/" + site + "/" + version).slice(0, 16) + "249+"
-```
-
-## Compatibility
-
-Fully compatible with the web version — same seed phrase generates the same passwords.
+---
 
 ## Files
 
 ```
-manifest.json          — Extension manifest (v3)
-background.js          — Service worker (state, context menu)
-content.js             — Content script (field detection, autofill)
-popup/                 — Popup UI
-  popup.html
-  popup.css
-  popup.js
-lib/                   — Shared libraries
-  vault-core.js        — Password generation & BIP39
-  vault-storage.js     — chrome.storage.local wrapper
-  crypto-js.min.js     — SHA256/AES
-  bip39WordList.js     — BIP39 wordlist
-  nostr-tools.min.js   — Nostr protocol (for future backup)
-icons/                 — Extension icons
+manifest.json       — MV3 manifest
+background.js       — service worker (state, context menu)
+content.js          — autofill injection
+popup/              — 12-screen popup UI
+lib/
+  vault-core.js     — password generation, BIP39, key derivation
+  vault-storage.js  — storage + Nostr backup
+  crypto-js.min.js
+  bip39WordList.js
+  nostr-tools.min.js
 ```
 
-## TODO
+---
 
-- [ ] Nostr backup/restore (port from web version)
-- [ ] Auto-detect and pre-fill username from saved sites
-- [ ] Keyboard shortcut (Ctrl+Shift+V) to open popup
-- [ ] Import from web version's localStorage
+## Recreating From Scratch
 
-## License
+Lost your device? New browser?
 
-MIT
+1. Install extension from [releases](https://github.com/topolino-claw/vault-extension/releases)
+2. Open popup → Restore
+3. Enter seed phrase → Enter backup password
+4. All sites restored from Nostr
+
+---
+
+## Compatibility
+
+Fully compatible with Vault Web — same seed phrase generates identical passwords on both.
+
+Repo: https://github.com/topolino-claw/vault-extension
