@@ -504,13 +504,8 @@ async function initializeVault(seedPhrase) {
   vault.seedPhrase = seedPhrase.replace(/\s+/g, ' ').trim().toLowerCase();
   vault.privateKey = await VaultCore.derivePrivateKey(vault.seedPhrase);
 
-  // Try to load saved site data
-  const saved = await VaultStorage.getVault();
-  if (saved) {
-    vault.users = { ...vault.users, ...saved.users };
-    if (saved.settings)
-      vault.settings = { ...vault.settings, ...saved.settings };
-  }
+  // Clean up any legacy plaintext vault data (migration)
+  await VaultStorage.getVault(); // triggers cleanup if plaintext key exists
 
   // Sync vault state to background service worker
   await syncStateToBackground();
@@ -531,15 +526,22 @@ async function syncFromNostrWithUI() {
   updateRelayStatus('syncing');
 
   try {
-    const data = await VaultStorage.restoreFromNostr(vault.privateKey);
+    const data = await VaultStorage.restoreFromNostr(
+      vault.privateKey,
+      () => showBackupPasswordPrompt('enter')
+    );
     if (data) {
       vault.users = { ...vault.users, ...data.users };
       if (data.settings) vault.settings = { ...vault.settings, ...data.settings };
-      await VaultStorage.saveVault(vault);
       await syncStateToBackground();
       renderSiteList();
       updateRelayStatus('connected');
       showToast('Synced from Nostr!');
+
+      // If backup was single-layer (legacy), nudge user to set a backup password
+      if (data.isLegacy && !vault.settings.hasBackupPassword) {
+        showBackupPasswordNudge();
+      }
     } else {
       updateRelayStatus('connected');
     }
@@ -589,6 +591,9 @@ async function lockVault(skipConfirm = false) {
   clipboardClearTimer = null;
   navigator.clipboard.writeText('').catch(() => {});
 
+  // Clear session backup password
+  VaultStorage.setSessionBackupPassword(null);
+
   vault = {
     privateKey: '',
     seedPhrase: '',
@@ -624,30 +629,22 @@ async function syncStateToBackground() {
 }
 
 /**
- * Persist non-sensitive vault data to chrome.storage.local if an encrypted
- * blob already exists (i.e., the vault has been set up with a password).
+ * Auto-save is now a no-op — plaintext vault storage has been removed.
  *
- * This is a "best-effort" auto-save that runs after site operations (copy,
- * fill, delete) to keep the site list in sync with on-disk state. If no
- * encrypted vault exists yet (first-time setup not complete), this is a no-op.
+ * The vault state lives only in:
+ *   1. In-memory `vault` object (this popup session)
+ *   2. Background service worker cache (survives popup close)
+ *   3. Encrypted blob in chrome.storage.local (survives SW death — requires password)
+ *   4. Nostr relays (remote backup — requires NIP-44 + optional backup password)
  *
- * Note: We cannot re-encrypt the sensitive blob without the user's password,
- * so only the non-sensitive `users` + `settings` are written here.
+ * The encrypted blob can only be updated when we have the user's encryption
+ * password, which happens at setup/re-encrypt time. The background SW cache
+ * is updated via syncStateToBackground() on every mutation.
  *
  * @async
  */
 async function autoSaveEncrypted() {
-  try {
-    const stored = await VaultStorage.getEncrypted();
-    if (!stored || Object.keys(stored).length === 0) return; // No saved vault yet
-    // We can't re-encrypt without the password, but we can update the
-    // non-sensitive site data in chrome.storage.local (VaultStorage.saveVault).
-    // The encrypted blob gets updated when user explicitly saves from settings,
-    // or on first setup. For now, persist non-sensitive data.
-    await VaultStorage.saveVault(vault);
-  } catch (e) {
-    console.error('Auto-save failed:', e);
-  }
+  // No-op: plaintext storage removed. Background sync handles in-session persistence.
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1460,7 +1457,158 @@ function triggerImport() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Nostr Backup — NIP-44 + kind:30078
+// Backup Password Prompt
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Whether the backup password nudge has been shown this session. @type {boolean} */
+let backupPasswordNudgeShown = false;
+
+/**
+ * Show a modal dialog for backup password entry.
+ * Uses the loading modal area repurposed as a simple prompt.
+ *
+ * @param {'set'|'enter'} mode - 'set' to create a new password, 'enter' to decrypt.
+ * @returns {Promise<string|null>} The password, or null if cancelled.
+ */
+function showBackupPasswordPrompt(mode) {
+  return new Promise((resolve) => {
+    // Create modal overlay
+    const overlay = document.createElement('div');
+    overlay.className = 'loading-modal';
+    overlay.style.cssText = 'display:flex;align-items:center;justify-content:center;z-index:1000;';
+
+    const box = document.createElement('div');
+    box.style.cssText = 'background:var(--bg-secondary,#1a1a2e);border-radius:12px;padding:20px;width:280px;text-align:center;';
+
+    const title = document.createElement('h3');
+    title.style.cssText = 'margin:0 0 8px;color:var(--text-primary,#fff);font-size:14px;';
+    title.textContent = mode === 'set' ? 'Set Backup Password' : 'Enter Backup Password';
+
+    const desc = document.createElement('p');
+    desc.style.cssText = 'margin:0 0 12px;color:var(--text-secondary,#aaa);font-size:11px;line-height:1.4;';
+    desc.textContent = mode === 'set'
+      ? 'This password adds a second encryption layer to your cloud backup. Remember it — it\'s never stored.'
+      : 'This backup is double-encrypted. Enter the backup password you set when creating it.';
+
+    const pass1 = document.createElement('input');
+    pass1.type = 'password';
+    pass1.placeholder = 'Backup password';
+    pass1.style.cssText = 'width:100%;box-sizing:border-box;margin-bottom:8px;';
+
+    let pass2 = null;
+    if (mode === 'set') {
+      pass2 = document.createElement('input');
+      pass2.type = 'password';
+      pass2.placeholder = 'Confirm password';
+      pass2.style.cssText = 'width:100%;box-sizing:border-box;margin-bottom:12px;';
+    }
+
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;gap:8px;justify-content:center;';
+
+    const btnConfirm = document.createElement('button');
+    btnConfirm.className = 'btn btn-primary btn-sm';
+    btnConfirm.textContent = mode === 'set' ? 'Set & Backup' : 'Decrypt';
+
+    const btnCancel = document.createElement('button');
+    btnCancel.className = 'btn btn-ghost btn-sm';
+    btnCancel.textContent = 'Cancel';
+
+    btnRow.appendChild(btnConfirm);
+    btnRow.appendChild(btnCancel);
+
+    box.appendChild(title);
+    box.appendChild(desc);
+    box.appendChild(pass1);
+    if (pass2) box.appendChild(pass2);
+    box.appendChild(btnRow);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    setTimeout(() => pass1.focus(), 50);
+
+    function cleanup() {
+      document.body.removeChild(overlay);
+    }
+
+    function onConfirm() {
+      const p1 = pass1.value;
+      if (!p1) { showToast('Password required'); return; }
+      if (mode === 'set' && pass2 && p1 !== pass2.value) {
+        showToast("Passwords don't match");
+        return;
+      }
+      cleanup();
+      resolve(p1);
+    }
+
+    function onCancel() {
+      cleanup();
+      resolve(null);
+    }
+
+    btnConfirm.addEventListener('click', onConfirm);
+    btnCancel.addEventListener('click', onCancel);
+    pass1.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') onConfirm();
+      if (e.key === 'Escape') onCancel();
+    });
+    if (pass2) {
+      pass2.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') onConfirm();
+        if (e.key === 'Escape') onCancel();
+      });
+    }
+  });
+}
+
+/**
+ * Show a non-blocking nudge toast suggesting the user set a backup password.
+ * Shown once per session after restoring from a legacy single-layer backup.
+ */
+function showBackupPasswordNudge() {
+  if (backupPasswordNudgeShown) return;
+  backupPasswordNudgeShown = true;
+
+  const toast = $('toast');
+  toast.innerHTML = '';
+
+  const text = document.createElement('span');
+  text.textContent = 'Backup not password-protected. ';
+
+  const btn = document.createElement('button');
+  btn.textContent = 'Set now';
+  btn.style.cssText = 'background:none;border:none;color:var(--accent,#7c5cff);cursor:pointer;text-decoration:underline;font-size:inherit;padding:0;margin-left:4px;';
+  btn.addEventListener('click', async () => {
+    toast.classList.remove('show');
+    const pwd = await showBackupPasswordPrompt('set');
+    if (pwd) {
+      VaultStorage.setSessionBackupPassword(pwd);
+      vault.settings.hasBackupPassword = true;
+      await syncStateToBackground();
+      showLoading('Upgrading backup...');
+      const result = await VaultStorage.backupToNostr(vault, false, pwd);
+      hideLoading();
+      if (result.success > 0) {
+        showToast(`Backup upgraded to ${result.success} relay(s)`);
+      } else {
+        showToast('Backup upgrade failed');
+      }
+    }
+  });
+
+  toast.appendChild(text);
+  toast.appendChild(btn);
+  toast.classList.add('show');
+  setTimeout(() => {
+    if (toast.classList.contains('show')) {
+      toast.classList.remove('show');
+    }
+  }, 8000); // Longer display for actionable toast
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Nostr Backup — NIP-44 + kind:30078 (double-encrypted)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -1479,9 +1627,20 @@ async function backupToNostr(silent = false) {
     return;
   }
 
+  // If interactive and no backup password set, prompt user to create one
+  if (!silent && !VaultStorage.getSessionBackupPassword() && !vault.settings.hasBackupPassword) {
+    const pwd = await showBackupPasswordPrompt('set');
+    if (pwd) {
+      VaultStorage.setSessionBackupPassword(pwd);
+      vault.settings.hasBackupPassword = true;
+      await syncStateToBackground();
+    }
+    // If user cancels, proceed with single-layer backup
+  }
+
   if (!silent) showLoading('Backing up to Nostr...');
 
-  const result = await VaultStorage.backupToNostr(vault);
+  const result = await VaultStorage.backupToNostr(vault, silent);
 
   if (!silent) {
     hideLoading();
@@ -1510,23 +1669,34 @@ async function restoreFromNostr() {
   showLoading('Restoring from Nostr...');
 
   try {
-    const data = await VaultStorage.restoreFromNostr(vault.privateKey);
+    const data = await VaultStorage.restoreFromNostr(
+      vault.privateKey,
+      () => { hideLoading(); return showBackupPasswordPrompt('enter'); }
+    );
     hideLoading();
 
     if (data) {
       vault.users = { ...vault.users, ...data.users };
       if (data.settings) vault.settings = { ...vault.settings, ...data.settings };
       renderSiteList();
-      await VaultStorage.saveVault(vault);
       await syncStateToBackground();
       showToast('Restored from Nostr!');
+
+      // If backup was legacy single-layer, prompt to upgrade
+      if (data.isLegacy && !vault.settings.hasBackupPassword) {
+        showBackupPasswordNudge();
+      }
     } else {
       showToast('No backup found');
     }
   } catch (e) {
     console.error(e);
     hideLoading();
-    showToast('Restore error');
+    if (e.message === 'Backup password required but cancelled') {
+      showToast('Restore cancelled — backup password required');
+    } else {
+      showToast('Restore error');
+    }
   }
 }
 
