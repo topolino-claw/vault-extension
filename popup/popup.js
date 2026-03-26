@@ -1029,8 +1029,8 @@ async function copyPassword() {
   // Persist
   await VaultStorage.saveVault(vault);
   await syncStateToBackground();
-  // Silent Nostr backup
-  VaultStorage.backupToNostr(vault).catch(e => console.error('Silent backup failed:', e));
+  // Silent Nostr backup (debounced)
+  backupToNostrDebounced();
 }
 
 /**
@@ -1315,7 +1315,8 @@ function showSeedPhrase() {
 async function copySeedPhrase() {
   try {
     await navigator.clipboard.writeText(vault.seedPhrase);
-    showToast('Seed phrase copied!');
+    showToast('Seed phrase copied — clipboard clears in 15s');
+    setTimeout(() => navigator.clipboard.writeText('').catch(() => {}), 15000);
   } catch {
     showToast('Copy failed');
   }
@@ -1396,7 +1397,7 @@ async function deleteSite(site, user) {
   renderSiteList();
   await VaultStorage.saveVault(vault);
   await syncStateToBackground();
-  VaultStorage.backupToNostr(vault).catch(e => console.error('Silent backup failed:', e));
+  backupToNostrDebounced();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1446,7 +1447,7 @@ function triggerImport() {
       renderSiteList();
       await VaultStorage.saveVault(vault);
       await syncStateToBackground();
-      VaultStorage.backupToNostr(vault).catch(e => console.error('Backup failed:', e));
+      backupToNostrDebounced();
       showToast(`Imported ${siteCount} site(s)!`);
     } catch (err) {
       console.error(err);
@@ -1610,6 +1611,20 @@ function showBackupPasswordNudge() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Nostr Backup — NIP-44 + kind:30078 (double-encrypted)
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Debounced version of silent Nostr backup.
+ * Coalesces rapid vault mutations (e.g. multiple copies/deletes) into a single
+ * backup after 3 seconds of inactivity.
+ */
+let _backupDebounceTimer = null;
+function backupToNostrDebounced() {
+  if (_backupDebounceTimer) clearTimeout(_backupDebounceTimer);
+  _backupDebounceTimer = setTimeout(() => {
+    backupToNostr(true);
+    _backupDebounceTimer = null;
+  }, 3000);
+}
 
 /**
  * Manually back up the vault to Nostr relays (initiated from Settings).
